@@ -2,7 +2,7 @@
 //! restic when `vendor/restic/restic.exe` exists. No disk, no elevation, no service install.
 
 use crate::cycle::{
-    plant_canaries, run_cycle, scan_folders, load_canaries, Env, Mount, Outcome, Paths,
+    load_canaries, plant_canaries, run_cycle, scan_folders, Env, Mount, Outcome, Paths,
 };
 use lifeboat_core::config::{Config, PendingDelete};
 use lifeboat_detect::{ChangeSet, FreezeState};
@@ -23,7 +23,9 @@ macro_rules! need_restic {
         match restic() {
             Some(p) => p,
             None => {
-                eprintln!("SKIPPED: vendor/restic/restic.exe missing; run scripts/fetch-restic.ps1");
+                eprintln!(
+                    "SKIPPED: vendor/restic/restic.exe missing; run scripts/fetch-restic.ps1"
+                );
                 return;
             }
         }
@@ -31,7 +33,10 @@ macro_rules! need_restic {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 fn random_bytes(seed: u64, n: usize) -> Vec<u8> {
@@ -47,7 +52,9 @@ fn random_bytes(seed: u64, n: usize) -> Vec<u8> {
 }
 
 fn prose(i: usize, n: usize) -> Vec<u8> {
-    let words = ["report", "budget", "invoice", "holiday", "notes", "the", "of", "and", "tax"];
+    let words = [
+        "report", "budget", "invoice", "holiday", "notes", "the", "of", "and", "tax",
+    ];
     let mut s = String::new();
     let mut k = i;
     while s.len() < n {
@@ -149,7 +156,11 @@ impl Env for SimEnv {
     }
     fn offline(&self, _disk: u32) {}
     fn scan(&self, since: u64) -> Result<ChangeSet, String> {
-        Ok(scan_folders(&self.cfg.folders, since, &load_canaries(&self.canaries)))
+        Ok(scan_folders(
+            &self.cfg.folders,
+            since,
+            &load_canaries(&self.canaries),
+        ))
     }
     fn backup(&self) -> Result<String, String> {
         self.calls.borrow_mut().push("backup".into());
@@ -167,7 +178,9 @@ impl Env for SimEnv {
         Ok(v.pop().map(|s| s.id))
     }
     fn tag_pre_alert(&self, id: &str) -> Result<(), String> {
-        self.engine().tag_add(id, PRE_ALERT_TAG).map_err(|e| e.to_string())
+        self.engine()
+            .tag_add(id, PRE_ALERT_TAG)
+            .map_err(|e| e.to_string())
     }
     fn retention(&self) -> Result<(), String> {
         self.calls.borrow_mut().push("retention".into());
@@ -181,7 +194,9 @@ impl Env for SimEnv {
         Ok(())
     }
     fn forget(&self, ids: &[String]) -> Result<(), String> {
-        self.calls.borrow_mut().push(format!("forget {}", ids.join(",")));
+        self.calls
+            .borrow_mut()
+            .push(format!("forget {}", ids.join(",")));
         Ok(())
     }
 }
@@ -207,7 +222,12 @@ fn world(n: usize) -> World {
         password: "pw-main".into(),
         ..Default::default()
     };
-    World { _t: t, src, cfg, paths }
+    World {
+        _t: t,
+        src,
+        cfg,
+        paths,
+    }
 }
 
 /// All files below `root` by file name (restic recreates the original path under the target).
@@ -220,7 +240,10 @@ fn by_name(root: &Path) -> BTreeMap<String, Vec<u8>> {
             if p.is_dir() {
                 stack.push(p);
             } else {
-                out.insert(p.file_name().unwrap().to_string_lossy().into_owned(), fs::read(&p).unwrap());
+                out.insert(
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    fs::read(&p).unwrap(),
+                );
             }
         }
     }
@@ -229,8 +252,15 @@ fn by_name(root: &Path) -> BTreeMap<String, Vec<u8>> {
 
 fn unhide(dir: &Path) {
     for e in fs::read_dir(dir).unwrap().flatten() {
-        if e.file_name().to_string_lossy().starts_with(".lifeboat-canary") {
-            let _ = std::process::Command::new("attrib").arg("-h").arg("-s").arg(e.path()).output();
+        if e.file_name()
+            .to_string_lossy()
+            .starts_with(".lifeboat-canary")
+        {
+            let _ = std::process::Command::new("attrib")
+                .arg("-h")
+                .arg("-s")
+                .arg(e.path())
+                .output();
         }
     }
 }
@@ -241,9 +271,14 @@ fn unhide(dir: &Path) {
 fn attack_keeps_the_clean_snapshot_and_restores_the_original_bytes() {
     let restic = need_restic!();
     let mut w = world(60);
-    Engine::new(restic.clone(), &w.cfg.repo, &w.cfg.password, w.cfg.folders.clone())
-        .init()
-        .unwrap();
+    Engine::new(
+        restic.clone(),
+        &w.cfg.repo,
+        &w.cfg.password,
+        w.cfg.folders.clone(),
+    )
+    .init()
+    .unwrap();
 
     // Day 1: clean backup through the real cycle.
     let env = SimEnv::new(&w.cfg, &w.paths, Some(restic.clone()));
@@ -255,7 +290,12 @@ fn attack_keeps_the_clean_snapshot_and_restores_the_original_bytes() {
     let good_id = snaps[0].id.clone();
     let original: BTreeMap<String, Vec<u8>> = user_files(&w.src)
         .iter()
-        .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), fs::read(p).unwrap()))
+        .map(|p| {
+            (
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                fs::read(p).unwrap(),
+            )
+        })
         .collect();
 
     // The attack: encrypt every file, rename to .locked, drop a note and touch a canary.
@@ -268,7 +308,11 @@ fn attack_keeps_the_clean_snapshot_and_restores_the_original_bytes() {
         l.push(".locked");
         fs::rename(p, l).unwrap();
     }
-    fs::write(w.src.join("README_DECRYPT.txt"), b"Your files are encrypted. Pay 2 BTC.").unwrap();
+    fs::write(
+        w.src.join("README_DECRYPT.txt"),
+        b"Your files are encrypted. Pay 2 BTC.",
+    )
+    .unwrap();
 
     let env = SimEnv::new(&w.cfg, &w.paths, Some(restic.clone()));
     let out = run_cycle(&env, &mut w.cfg, &w.paths);
@@ -279,13 +323,19 @@ fn attack_keeps_the_clean_snapshot_and_restores_the_original_bytes() {
     // No new snapshot kept; the old one carries pre-alert (tagging rewrites its id).
     let snaps = engine.snapshots().unwrap();
     assert_eq!(snaps.len(), 1, "no new snapshot after an attack: {snaps:?}");
-    assert!(snaps[0].tags.iter().any(|t| t == PRE_ALERT_TAG), "{snaps:?}");
+    assert!(
+        snaps[0].tags.iter().any(|t| t == PRE_ALERT_TAG),
+        "{snaps:?}"
+    );
     let _ = good_id;
     assert!(FreezeState::load(&w.paths.freeze).unwrap().frozen);
 
     // Frozen: the next cycle does nothing, even though the scheduler keeps firing.
     let env = SimEnv::new(&w.cfg, &w.paths, Some(restic.clone()));
-    assert_eq!(run_cycle(&env, &mut w.cfg, &w.paths), Outcome::SkippedFrozen);
+    assert_eq!(
+        run_cycle(&env, &mut w.cfg, &w.paths),
+        Outcome::SkippedFrozen
+    );
     assert!(env.calls.borrow().is_empty());
 
     // The pre-alert snapshot restores the original bytes.
@@ -294,7 +344,11 @@ fn attack_keeps_the_clean_snapshot_and_restores_the_original_bytes() {
     let restored = by_name(&out);
     let mut checked = 0;
     for (name, bytes) in &original {
-        assert_eq!(restored.get(name), Some(bytes), "{name} differs after restore");
+        assert_eq!(
+            restored.get(name),
+            Some(bytes),
+            "{name} differs after restore"
+        );
         checked += 1;
     }
     assert_eq!(checked, 60);
@@ -304,17 +358,31 @@ fn attack_keeps_the_clean_snapshot_and_restores_the_original_bytes() {
 fn recovery_key_opens_the_repo_and_a_wrong_key_does_not() {
     let restic = need_restic!();
     let w = world(8);
-    let e = Engine::new(restic.clone(), &w.cfg.repo, "pw-main", w.cfg.folders.clone());
+    let e = Engine::new(
+        restic.clone(),
+        &w.cfg.repo,
+        "pw-main",
+        w.cfg.folders.clone(),
+    );
     e.init().unwrap();
     e.backup().unwrap();
     e.add_key("recovery-words-one-two-three").unwrap();
 
     // The user forgot "pw-main": the recovery key alone opens the repo and lists the snapshot.
-    let by_key = Engine::new(restic.clone(), &w.cfg.repo, "recovery-words-one-two-three", w.cfg.folders.clone());
-    assert!(by_key.verify_password("recovery-words-one-two-three").unwrap());
+    let by_key = Engine::new(
+        restic.clone(),
+        &w.cfg.repo,
+        "recovery-words-one-two-three",
+        w.cfg.folders.clone(),
+    );
+    assert!(by_key
+        .verify_password("recovery-words-one-two-three")
+        .unwrap());
     assert_eq!(by_key.snapshots().unwrap().len(), 1);
     let out = w._t.path().join("restored-by-key");
-    by_key.restore(&by_key.snapshots().unwrap()[0].id, &out, None).unwrap();
+    by_key
+        .restore(&by_key.snapshots().unwrap()[0].id, &out, None)
+        .unwrap();
     assert!(by_name(&out).len() >= 8);
 
     assert!(e.verify_password("pw-main").unwrap());
@@ -364,7 +432,11 @@ fn mass_delete_that_also_wipes_the_canaries_freezes() {
 fn normal_day_backs_up_and_does_not_freeze() {
     let mut w = world(60);
     w.cfg.last_run = now() - 600;
-    for p in user_files(&w.src).iter().filter(|p| p.extension().unwrap() == "docx").take(3) {
+    for p in user_files(&w.src)
+        .iter()
+        .filter(|p| p.extension().unwrap() == "docx")
+        .take(3)
+    {
         let mut b = fs::read(p).unwrap();
         b.extend(prose(3, 300));
         fs::write(p, b).unwrap();
@@ -380,24 +452,50 @@ fn normal_day_backs_up_and_does_not_freeze() {
     let out = {
         struct NoRestic(SimEnv);
         impl Env for NoRestic {
-            fn now(&self) -> u64 { self.0.now() }
-            fn mount(&self) -> Result<Mount, String> { self.0.mount() }
-            fn offline(&self, d: u32) { self.0.offline(d) }
-            fn scan(&self, s: u64) -> Result<ChangeSet, String> { self.0.scan(s) }
-            fn backup(&self) -> Result<String, String> { self.0.calls.borrow_mut().push("backup".into()); Ok("snap".into()) }
-            fn latest_snapshot(&self) -> Result<Option<String>, String> { Ok(None) }
-            fn tag_pre_alert(&self, _: &str) -> Result<(), String> { Ok(()) }
-            fn retention(&self) -> Result<(), String> { self.0.retention() }
-            fn check_subset(&self) -> Result<(), String> { self.0.check_subset() }
-            fn forget(&self, ids: &[String]) -> Result<(), String> { self.0.forget(ids) }
+            fn now(&self) -> u64 {
+                self.0.now()
+            }
+            fn mount(&self) -> Result<Mount, String> {
+                self.0.mount()
+            }
+            fn offline(&self, d: u32) {
+                self.0.offline(d)
+            }
+            fn scan(&self, s: u64) -> Result<ChangeSet, String> {
+                self.0.scan(s)
+            }
+            fn backup(&self) -> Result<String, String> {
+                self.0.calls.borrow_mut().push("backup".into());
+                Ok("snap".into())
+            }
+            fn latest_snapshot(&self) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            fn tag_pre_alert(&self, _: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn retention(&self) -> Result<(), String> {
+                self.0.retention()
+            }
+            fn check_subset(&self) -> Result<(), String> {
+                self.0.check_subset()
+            }
+            fn forget(&self, ids: &[String]) -> Result<(), String> {
+                self.0.forget(ids)
+            }
         }
         let n = NoRestic(env);
         let o = run_cycle(&n, &mut w.cfg, &w.paths);
         assert!(n.0.called("backup"));
         o
     };
-    assert!(matches!(out, Outcome::Backed { .. }), "false positive: {out:?}");
-    assert!(!FreezeState::load(&w.paths.freeze).map(|f| f.frozen).unwrap_or(false));
+    assert!(
+        matches!(out, Outcome::Backed { .. }),
+        "false positive: {out:?}"
+    );
+    assert!(!FreezeState::load(&w.paths.freeze)
+        .map(|f| f.frozen)
+        .unwrap_or(false));
 }
 
 // ---- full disk -----------------------------------------------------------------------------------
@@ -409,16 +507,32 @@ const DISK_FULL: &str = "restic failed (Some(1)): Fatal: unable to save snapshot
 fn full_disk_is_an_error_and_never_forgets_or_prunes() {
     let mut w = world(10);
     // A due delayed delete and a due retention must NOT run when the backup could not be saved.
-    w.cfg.pending_deletes = vec![PendingDelete { id: "oldsnap".into(), due: 1 }];
+    w.cfg.pending_deletes = vec![PendingDelete {
+        id: "oldsnap".into(),
+        due: 1,
+    }];
     let mut env = SimEnv::new(&w.cfg, &w.paths, None);
     env.backup_error = Some(DISK_FULL.into());
     let out = run_cycle(&env, &mut w.cfg, &w.paths);
     assert!(matches!(out, Outcome::Error(_)), "{out:?}");
-    assert!(!env.called("retention"), "retention (prune) ran after a failed backup");
-    assert!(!env.calls.borrow().iter().any(|c| c.starts_with("forget")), "forget ran");
+    assert!(
+        !env.called("retention"),
+        "retention (prune) ran after a failed backup"
+    );
+    assert!(
+        !env.calls.borrow().iter().any(|c| c.starts_with("forget")),
+        "forget ran"
+    );
     assert!(!env.called("check"));
-    assert_eq!(w.cfg.pending_deletes.len(), 1, "pending delete was consumed");
-    assert_eq!(w.cfg.last_run, 0, "last_run moved although nothing was saved");
+    assert_eq!(
+        w.cfg.pending_deletes.len(),
+        1,
+        "pending delete was consumed"
+    );
+    assert_eq!(
+        w.cfg.last_run, 0,
+        "last_run moved although nothing was saved"
+    );
 }
 
 #[test]

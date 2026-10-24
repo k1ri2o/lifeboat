@@ -27,8 +27,21 @@ fn random_bytes(seed: u64, n: usize) -> Vec<u8> {
 
 fn prose(i: usize, n: usize) -> Vec<u8> {
     let words = [
-        "quarterly", "report", "budget", "invoice", "holiday", "photos", "meeting", "notes", "the",
-        "of", "and", "family", "tax", "return", "draft",
+        "quarterly",
+        "report",
+        "budget",
+        "invoice",
+        "holiday",
+        "photos",
+        "meeting",
+        "notes",
+        "the",
+        "of",
+        "and",
+        "family",
+        "tax",
+        "return",
+        "draft",
     ];
     let mut s = String::new();
     let mut k = i;
@@ -46,7 +59,10 @@ fn file_bytes(ext: &str, i: usize) -> Vec<u8> {
     let (head, n): (&[u8], usize) = match ext {
         "docx" | "xlsx" => (b"PK\x03\x04\x14\x00\x06\x00", 6000),
         "pdf" => (b"%PDF-1.7\n", 9000),
-        "jpg" => (&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46], 12000),
+        "jpg" => (
+            &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46],
+            12000,
+        ),
         _ => (b"", 3000),
     };
     let mut v = head.to_vec();
@@ -66,7 +82,11 @@ fn make_folder(dir: &Path, n: usize) {
             "docx" | "xlsx" => "Work",
             _ => "",
         };
-        fs::write(dir.join(sub).join(format!("file{i}.{ext}")), file_bytes(ext, i)).unwrap();
+        fs::write(
+            dir.join(sub).join(format!("file{i}.{ext}")),
+            file_bytes(ext, i),
+        )
+        .unwrap();
     }
 }
 
@@ -336,7 +356,11 @@ fn d_a_normal_day_does_not_freeze() {
     let s = setup(100);
     let files = s.real_files();
     // Edit 3 documents, add 20 photos and a new doc.
-    for p in files.iter().filter(|p| p.extension().unwrap() == "docx").take(3) {
+    for p in files
+        .iter()
+        .filter(|p| p.extension().unwrap() == "docx")
+        .take(3)
+    {
         let mut b = fs::read(p).unwrap();
         b.extend(prose(77, 400));
         fs::write(p, b).unwrap();
@@ -345,9 +369,17 @@ fn d_a_normal_day_does_not_freeze() {
         let mut v = file_bytes("jpg", 1000 + i as usize);
         // Photos are compressed, so their tail is high entropy: still not an attack.
         v.extend(random_bytes(i, 20000));
-        fs::write(s.dir.path().join("Photos").join(format!("IMG_{i:04}.jpg")), v).unwrap();
+        fs::write(
+            s.dir.path().join("Photos").join(format!("IMG_{i:04}.jpg")),
+            v,
+        )
+        .unwrap();
     }
-    fs::write(s.dir.path().join("Work").join("new.docx"), file_bytes("docx", 9)).unwrap();
+    fs::write(
+        s.dir.path().join("Work").join("new.docx"),
+        file_bytes("docx", 9),
+    )
+    .unwrap();
     let v = s.verdict(&trained(), 3600);
     assert_eq!(v, Verdict::Ok, "false positive");
 }
@@ -380,7 +412,10 @@ fn d_big_import_of_compressed_files_does_not_freeze() {
 fn d_renaming_a_document_is_not_an_attack() {
     let s = setup(100);
     let files = s.real_files();
-    let p = files.iter().find(|p| p.extension().unwrap() == "txt").unwrap();
+    let p = files
+        .iter()
+        .find(|p| p.extension().unwrap() == "txt")
+        .unwrap();
     fs::rename(p, p.with_file_name("renamed_notes.txt")).unwrap();
     let v = s.verdict(&trained(), 60);
     assert!(!v.is_attack(), "{v:?}");

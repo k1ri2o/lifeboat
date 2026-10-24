@@ -4,9 +4,9 @@ mod cycle;
 mod dpapi;
 mod scheduler;
 mod security;
+mod server;
 #[cfg(test)]
 mod sim_tests;
-mod server;
 mod store;
 
 use std::ffi::OsString;
