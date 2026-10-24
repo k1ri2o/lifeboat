@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Lifeboat", "width": 600, "height": 400 }],
+    "windows": [{ "title": "Lifeboat", "label": "main", "width": 760, "height": 640, "minWidth": 520, "minHeight": 480 }],
     "security": { "csp": null }
   },
   "bundle": {
