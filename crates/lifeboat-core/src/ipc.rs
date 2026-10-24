@@ -1,6 +1,7 @@
 //! IPC protocol between the UI and the service: one JSON object per line over
 //! the named pipe [`PIPE_NAME`].
 
+use crate::disk::{DiskInfo, PrepareMode};
 use serde::{Deserialize, Serialize};
 
 /// Name of the named pipe the service listens on.
@@ -20,6 +21,13 @@ pub enum Request {
         snapshot: String,
         target: String,
         path: Option<String>,
+    },
+    /// List the disks the machine has.
+    ListDisks,
+    /// Create the hidden Lifeboat partition on `disk`.
+    PrepareDisk {
+        disk: u32,
+        mode: PrepareMode,
     },
 }
 
@@ -50,6 +58,13 @@ pub enum Response {
         snapshots: Vec<SnapshotInfo>,
     },
     Restored,
+    Disks {
+        disks: Vec<DiskInfo>,
+    },
+    Prepared {
+        /// Volume GUID path of the new partition (a "Volume{...}" path under the device namespace).
+        volume_path: String,
+    },
     Error {
         message: String,
     },

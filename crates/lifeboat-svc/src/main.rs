@@ -1,5 +1,6 @@
 //! Lifeboat Windows service. Usage: `lifeboat-svc install|uninstall|run`.
 
+mod security;
 mod server;
 
 use std::ffi::OsString;
@@ -13,7 +14,7 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-const SERVICE_NAME: &str = "Lifeboat";
+use security::SERVICE_NAME;
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 define_windows_service!(ffi_service_main, service_main);
@@ -111,12 +112,22 @@ fn install() -> windows_service::Result<()> {
         executable_path: std::env::current_exe().map_err(windows_service::Error::Winapi)?,
         launch_arguments: vec![OsString::from("service")],
         dependencies: vec![],
-        // LocalSystem for now; a dedicated account comes with M3.
+        // LocalSystem: creating/shrinking partitions, taking disks offline and rewriting ACLs
+        // need rights a virtual account (NT SERVICE\lifeboat-svc) does not have. The service
+        // SID enabled below still gives the volume ACL and the pipe a service-specific identity.
         account_name: None,
         account_password: None,
     };
     let service = manager.create_service(&info, ServiceAccess::CHANGE_CONFIG)?;
     service.set_description("Lifeboat: encrypted, versioned backups")?;
+    // Unrestricted service SID so `NT SERVICE\lifeboat-svc` can be used in ACLs and the pipe SDDL.
+    let status = std::process::Command::new("sc.exe")
+        .args(["sidtype", SERVICE_NAME, "unrestricted"])
+        .status()
+        .map_err(windows_service::Error::Winapi)?;
+    if !status.success() {
+        eprintln!("warning: sc sidtype failed ({status}); service SID not enabled");
+    }
     println!("installed service {SERVICE_NAME}");
     Ok(())
 }
