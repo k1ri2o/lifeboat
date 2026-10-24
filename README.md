@@ -1,5 +1,7 @@
 # Lifeboat
 
+> **Not ready yet.** Lifeboat is under active development and has no release. Don't use it to protect real data, and don't run the disk setup on a disk you care about. Follow the [milestones](docs/PLAN.md#5-milestones) for progress.
+
 Lifeboat is a small, open-source Windows app that keeps encrypted, versioned backups of the folders you pick on a hidden partition that ransomware and viruses can't easily reach. A Tauri 2 UI talks to a Rust Windows service (`lifeboat-svc`) over a local named pipe, and the service drives a bundled restic engine. See [docs/PLAN.md](docs/PLAN.md) for the design and milestones.
 
 ## Build
