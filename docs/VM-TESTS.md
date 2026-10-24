@@ -43,7 +43,7 @@ Open PowerShell **as Administrator** in the repo folder.
 
 ## 4. Real pipe check (admin)
 
-- [ ] Run the app (`cargo tauri dev` in `crates\lifeboat-app`, or the built exe). The status line says the service is connected.
+- [ ] Run the app (`npm install; npm run tauri dev` in `app`, or the built exe). The status line says the service is connected.
 - [ ] Stop the service (`Stop-Service`). The app says the service is not reachable within a few seconds, with no crash.
 - [ ] Start it again. The app reconnects on its own.
 - [ ] From a **non-admin** PowerShell, the app still connects (the pipe is open to normal users, the disk actions are not).
