@@ -37,13 +37,13 @@ impl ShrinkPlan {
     ) -> Result<Self> {
         let lifeboat_size = lifeboat_size / MIB * MIB;
         if lifeboat_size < 512 * MIB {
-            return Err(Error::Parse(
+            return Err(Error::Invalid(
                 "Lifeboat partition must be at least 512 MiB".into(),
             ));
         }
         let new_size = current_size.saturating_sub(lifeboat_size);
         if new_size < min_size {
-            return Err(Error::Parse(format!(
+            return Err(Error::Invalid(format!(
                 "not enough free space on {drive_letter}: can free at most {}, asked for {}",
                 gib(current_size.saturating_sub(min_size)),
                 gib(lifeboat_size)
@@ -87,7 +87,7 @@ struct Sizes {
 /// Read-only: compute what shrinking volume `drive_letter` by `lifeboat_size` bytes would do.
 pub fn plan_shrink(drive_letter: char, lifeboat_size: u64) -> Result<ShrinkPlan> {
     if !drive_letter.is_ascii_alphabetic() {
-        return Err(Error::Parse("drive letter must be A-Z".into()));
+        return Err(Error::Invalid("drive letter must be A-Z".into()));
     }
     let out = ps::run(&format!(
         "$l = {}; $p = Get-Partition -DriveLetter $l; $s = Get-PartitionSupportedSize -DriveLetter $l; \

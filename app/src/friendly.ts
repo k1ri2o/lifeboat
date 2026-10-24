@@ -79,6 +79,23 @@ export function friendlyError(e: unknown): FriendlyError {
     const r = RULES[RULES.length - 1];
     return { title: r.title, next: r.next, details: message, unreachable: true };
   }
+  const space = /free space on ([A-Z]):.*?at most ([\d.]+) GiB.*?asked for ([\d.]+) GiB/i.exec(message);
+  if (space) {
+    const [, drive, most, asked] = space;
+    const max = Math.floor(Number(most));
+    return {
+      title: `Drive ${drive.toUpperCase()}: does not have room for ${Math.round(Number(asked))} GB of backups.`,
+      next:
+        max >= 1
+          ? `Lifeboat can set aside at most ${max} GB there. Go back to step 1 and enter ${max} or less, free up space on ${drive.toUpperCase()}:, or use a USB drive instead.`
+          : `There is almost no free room on ${drive.toUpperCase()}:. Free up space there, or use a USB drive instead.`,
+      details: message,
+      unreachable: false,
+    };
+  }
+  if (/at least 512 MiB/i.test(message)) {
+    return { title: "That is too little space for backups.", next: "Go back to step 1 and set aside at least 1 GB.", details: message, unreachable: false };
+  }
   for (const r of RULES) {
     if (r.test.test(message)) {
       return { title: r.title, next: r.next, details: message, unreachable: !!r.unreachable };

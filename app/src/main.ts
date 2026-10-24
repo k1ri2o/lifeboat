@@ -477,6 +477,7 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
       detail.replaceChildren(
         h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "This is less safe"), h("p", { class: "muted" }, "Lifeboat has to make an existing drive smaller to make room. If this computer breaks, the backups are lost with it. A USB drive is a better choice."))),
         h("div", { class: "fields" }, h("div", {}, h("label", { for: "letter" }, "Which drive letter should be made smaller?"), letter), h("div", {}, h("label", { for: "gb" }, "How many GB should be set aside?"), gb)),
+        h("p", { class: "muted small" }, "Pick more than the folders you want to protect take up. It must fit in the free space on that drive; if it does not, Lifeboat will tell you the most it can use."),
       );
     }
   };
