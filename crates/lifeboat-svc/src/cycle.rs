@@ -114,6 +114,9 @@ pub fn run_cycle(env: &dyn Env, cfg: &mut Config, paths: &Paths) -> Outcome {
     if freeze.frozen {
         return Outcome::SkippedFrozen;
     }
+    // Folders added after setup get bait files too; recorded before the scan, so they are not
+    // seen as changed. Best effort: a folder that cannot be written to is retried next cycle.
+    let _ = plant_missing_canaries(&cfg.folders, &paths.canaries);
     let mount = match env.mount() {
         Ok(m) => m,
         Err(e) => return Outcome::Error(e),
@@ -210,6 +213,25 @@ pub fn plant_canaries(folders: &[PathBuf], path: &Path) -> Result<(), String> {
         all.push(m);
     }
     save_canaries(path, &all).map_err(|e| e.to_string())
+}
+
+/// Plant canaries in every existing watched folder that has none recorded yet.
+pub fn plant_missing_canaries(folders: &[PathBuf], path: &Path) -> Result<(), String> {
+    let known = load_canaries(path);
+    let missing: Vec<PathBuf> = folders
+        .iter()
+        .filter(|f| f.is_dir())
+        .filter(|f| {
+            !known
+                .iter()
+                .any(|m| m.files.iter().any(|c| c.path.parent() == Some(f.as_path())))
+        })
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    plant_canaries(&missing, path)
 }
 
 // ---- real environment ----
@@ -415,6 +437,8 @@ mod tests {
         attack: bool,
         mount_fails: bool,
         backup_fails: bool,
+        /// When set, `scan` reports hits from the canaries saved here, like the real scan.
+        canaries: Option<PathBuf>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -448,6 +472,11 @@ mod tests {
                 total_files: 100,
                 ..Default::default()
             };
+            if let Some(p) = &self.canaries {
+                for m in load_canaries(p) {
+                    cs.canary_hits.extend(check_canaries(&m));
+                }
+            }
             if self.attack {
                 cs.canary_hits.push(CanaryHit {
                     path: "C:/x/canary.docx".into(),
@@ -685,5 +714,39 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert!(!m[0].files.is_empty());
         assert!(check_canaries(&m[0]).is_empty());
+    }
+
+    #[test]
+    fn folder_added_after_init_gets_canaries_without_freezing() {
+        let (_d, p) = setup();
+        let folder = tempfile::tempdir().unwrap();
+        let mut cfg = Config {
+            folders: vec![folder.path().to_path_buf()],
+            ..Config::default()
+        };
+        let env = Fake {
+            canaries: Some(p.canaries.clone()),
+            ..Default::default()
+        };
+        // First cycle plants the bait and does not treat it as changed.
+        let out = run_cycle(&env, &mut cfg, &p);
+        assert!(matches!(out, Outcome::Backed { .. }), "{out:?}");
+        let m = load_canaries(&p.canaries);
+        assert_eq!(m.len(), 1);
+        assert!(!m[0].files.is_empty());
+        // A second cycle does not plant again.
+        run_cycle(&env, &mut cfg, &p);
+        assert_eq!(load_canaries(&p.canaries).len(), 1);
+        // Tampering with a canary freezes the next cycle.
+        let f = &m[0].files[0].path;
+        if cfg!(windows) {
+            let _ = std::process::Command::new("attrib")
+                .args(["-h", "-s"])
+                .arg(f)
+                .output();
+        }
+        std::fs::write(f, b"encrypted").unwrap();
+        let out = run_cycle(&env, &mut cfg, &p);
+        assert!(matches!(out, Outcome::Attack { .. }), "{out:?}");
     }
 }
