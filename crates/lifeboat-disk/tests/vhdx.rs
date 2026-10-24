@@ -82,10 +82,13 @@ fn full_cycle_on_vhdx() {
     );
     let n = d.number;
 
-    let vol = prepare_external(n).expect("prepare");
+    let prepared = prepare_external(n).expect("prepare");
+    let vol = prepared.volume_path.clone();
     assert!(vol.to_lowercase().starts_with(r"\\?\volume{"), "{vol}");
     assert_eq!(
-        find_lifeboat_volume().unwrap().as_deref(),
+        find_lifeboat_volume(&prepared.partition_guid)
+            .unwrap()
+            .as_deref(),
         Some(vol.as_str())
     );
     let after = list_disks().unwrap();

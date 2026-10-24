@@ -1,6 +1,8 @@
 //! Named-pipe server speaking the JSON-lines protocol.
 
-use crate::security::{production_sddl, Descriptor};
+use crate::security::{
+    gate, pipe_client_is_admin, production_sddl, require_admin, Descriptor, RateLimiter, Refusal,
+};
 use lifeboat_core::config::Config;
 use lifeboat_core::disk::PrepareMode;
 use lifeboat_core::ipc::{Request, Response, SnapshotInfo, PIPE_NAME};
@@ -8,6 +10,7 @@ use lifeboat_engine::Engine;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::sync::watch;
@@ -24,6 +27,7 @@ pub fn config_from_env() -> Config {
             .collect(),
         repo: PathBuf::from(var("LIFEBOAT_REPO")),
         password: var("LIFEBOAT_PASSWORD"),
+        partition_guid: var("LIFEBOAT_PARTITION_GUID"),
     }
 }
 
@@ -45,8 +49,41 @@ fn engine(cfg: &Config) -> Result<Engine, Response> {
     ))
 }
 
-/// Compute the reply for one request line.
-pub fn handle_line(line: &str, cfg: &Config) -> Response {
+/// Check `password` against the repository (`restic cat config`).
+fn verify_password(cfg: &Config, password: &str) -> Result<bool, String> {
+    if cfg.repo.as_os_str().is_empty() {
+        return Err("backup repository is not configured".into());
+    }
+    if password.is_empty() {
+        return Ok(false);
+    }
+    Engine::new(
+        Engine::default_restic(),
+        cfg.repo.clone(),
+        password.to_string(),
+        cfg.folders.clone(),
+    )
+    .verify_password(password)
+    .map_err(|e| e.to_string())
+}
+
+/// Password gate for dangerous requests, using the repo from `cfg`.
+fn password_gate(cfg: &Config, ctx: &RateLimiter, password: &str) -> Result<(), Refusal> {
+    gate(ctx, Instant::now(), || verify_password(cfg, password))
+}
+
+fn refused(r: Refusal) -> Response {
+    err(r)
+}
+
+/// Compute the reply for one request line. `limiter` counts wrong passwords; `is_admin` tells
+/// whether the pipe client is an elevated administrator (asked only when a request needs it).
+pub fn handle_line(
+    line: &str,
+    cfg: &Config,
+    limiter: &RateLimiter,
+    is_admin: &dyn Fn() -> bool,
+) -> Response {
     match serde_json::from_str::<Request>(line) {
         Ok(Request::Backup) => match engine(cfg) {
             Ok(e) => e
@@ -76,13 +113,19 @@ pub fn handle_line(line: &str, cfg: &Config) -> Response {
             snapshot,
             target,
             path,
-        }) => match engine(cfg) {
-            Ok(e) => e
-                .restore(&snapshot, std::path::Path::new(&target), path.as_deref())
-                .map(|_| Response::Restored)
-                .unwrap_or_else(err),
-            Err(r) => r,
-        },
+            password,
+        }) => {
+            if let Err(r) = password_gate(cfg, limiter, &password) {
+                return refused(r);
+            }
+            match engine(cfg) {
+                Ok(e) => e
+                    .restore(&snapshot, std::path::Path::new(&target), path.as_deref())
+                    .map(|_| Response::Restored)
+                    .unwrap_or_else(err),
+                Err(r) => r,
+            }
+        }
         Ok(Request::Ping) => Response::Pong,
         Ok(Request::Status) => Response::Status {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -92,10 +135,26 @@ pub fn handle_line(line: &str, cfg: &Config) -> Response {
             Ok(disks) => Response::Disks { disks },
             Err(e) => err(e),
         },
-        Ok(Request::PrepareDisk { disk, mode }) => match prepare(disk, mode) {
-            Ok(volume_path) => Response::Prepared { volume_path },
-            Err(e) => err(e),
-        },
+        Ok(Request::PrepareDisk {
+            disk,
+            mode,
+            password,
+        }) => {
+            // Admin first (cheap, no password guess is spent), then the password.
+            if let Err(r) = require_admin(is_admin()) {
+                return refused(r);
+            }
+            if let Err(r) = password_gate(cfg, limiter, &password) {
+                return refused(r);
+            }
+            match prepare(disk, mode) {
+                Ok(v) => Response::Prepared {
+                    volume_path: v.volume_path,
+                    partition_guid: v.partition_guid,
+                },
+                Err(e) => err(e),
+            }
+        }
         Err(e) => Response::Error {
             message: format!("bad request: {e}"),
         },
@@ -103,7 +162,7 @@ pub fn handle_line(line: &str, cfg: &Config) -> Response {
 }
 
 /// Create the hidden partition (external or internal shrink), then lock it down to the service.
-fn prepare(disk: u32, mode: PrepareMode) -> lifeboat_disk::Result<String> {
+fn prepare(disk: u32, mode: PrepareMode) -> lifeboat_disk::Result<lifeboat_disk::PreparedVolume> {
     let volume = match mode {
         PrepareMode::External => lifeboat_disk::prepare_external(disk)?,
         PrepareMode::InternalShrink {
@@ -120,7 +179,7 @@ fn prepare(disk: u32, mode: PrepareMode) -> lifeboat_disk::Result<String> {
             lifeboat_disk::execute_shrink(&plan)?
         }
     };
-    lifeboat_disk::lock_down(&volume)?;
+    lifeboat_disk::lock_down(&volume.volume_path)?;
     Ok(volume)
 }
 
@@ -147,6 +206,7 @@ pub async fn serve(
     mut stop: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let sd = Descriptor::from_sddl(sddl)?;
+    let limiter = Arc::new(RateLimiter::default());
     let mut server = create_instance(pipe, &sd, true)?;
     loop {
         tokio::select! {
@@ -156,13 +216,20 @@ pub async fn serve(
                 let client = server;
                 server = create_instance(pipe, &sd, false)?;
                 let cfg = cfg.clone();
+                let limiter = limiter.clone();
+                // Raw server handle for the per-request admin check. The pipe object lives in
+                // this task (split below) until the connection ends, so it stays valid.
+                let raw = std::os::windows::io::AsRawHandle::as_raw_handle(&client) as usize;
                 tokio::spawn(async move {
                     let (r, mut w) = tokio::io::split(client);
                     let mut lines = BufReader::new(r).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
                         let cfg = cfg.clone();
-                        let resp = tokio::task::spawn_blocking(move || handle_line(&line, &cfg))
-                            .await
+                        let limiter = limiter.clone();
+                        let resp = tokio::task::spawn_blocking(move || {
+                            handle_line(&line, &cfg, &limiter, &|| pipe_client_is_admin(raw))
+                        })
+                        .await
                             .unwrap_or_else(err);
                         let mut out = serde_json::to_string(&resp).unwrap_or_default();
                         out.push('\n');
@@ -195,48 +262,107 @@ mod tests {
         Config::default()
     }
 
+    fn call(line: &str, admin: bool) -> Response {
+        handle_line(line, &cfg(), &RateLimiter::default(), &|| admin)
+    }
+
     #[test]
     fn backup_unconfigured_is_error() {
         assert!(matches!(
-            handle_line(r#"{"cmd":"Backup"}"#, &cfg()),
+            call(r#"{"cmd":"Backup"}"#, false),
             Response::Error { .. }
         ));
         assert!(matches!(
-            handle_line(r#"{"cmd":"ListSnapshots"}"#, &cfg()),
+            call(r#"{"cmd":"ListSnapshots"}"#, false),
             Response::Error { .. }
         ));
     }
 
     #[test]
     fn ping_pong() {
-        assert_eq!(handle_line(r#"{"cmd":"Ping"}"#, &cfg()), Response::Pong);
+        assert_eq!(call(r#"{"cmd":"Ping"}"#, false), Response::Pong);
     }
 
     #[test]
     fn status() {
         assert!(matches!(
-            handle_line(r#"{"cmd":"Status"}"#, &cfg()),
+            call(r#"{"cmd":"Status"}"#, false),
             Response::Status { frozen: false, .. }
         ));
     }
 
     #[test]
     fn garbage() {
-        assert!(matches!(
-            handle_line("nope", &cfg()),
-            Response::Error { .. }
-        ));
+        assert!(matches!(call("nope", false), Response::Error { .. }));
     }
 
     #[test]
     fn new_requests_parse() {
         assert!(!matches!(
-            handle_line(
+            call(
                 r#"{"cmd":"PrepareDisk","disk":1,"mode":{"mode":"Nope"}}"#,
-                &cfg()
+                false
             ),
             Response::Disks { .. } | Response::Prepared { .. }
         ));
+    }
+
+    const PREPARE: &str =
+        r#"{"cmd":"PrepareDisk","disk":1,"mode":{"mode":"External"},"password":"x"}"#;
+
+    fn message(r: Response) -> String {
+        match r {
+            Response::Error { message } => message,
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_disk_refused_for_non_admin() {
+        assert_eq!(message(call(PREPARE, false)), "needs administrator");
+    }
+
+    #[test]
+    fn prepare_disk_admin_still_needs_repo_to_check_password() {
+        // Admin passes the first gate; with no repo configured the password cannot be checked,
+        // so nothing touches a disk.
+        let m = message(call(PREPARE, true));
+        assert!(m.starts_with("cannot check password"), "{m}");
+    }
+
+    #[test]
+    fn restore_needs_password_field() {
+        let r = call(
+            r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","path":null}"#,
+            true,
+        );
+        assert!(message(r).starts_with("bad request"));
+        let m = message(call(
+            r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","path":null,"password":""}"#,
+            true,
+        ));
+        assert!(m.starts_with("cannot check password"), "{m}");
+    }
+
+    #[test]
+    fn empty_password_counts_as_wrong_and_locks_out() {
+        let c = Config {
+            repo: PathBuf::from("C:/nonexistent-repo"),
+            ..Config::default()
+        };
+        let l = RateLimiter::default();
+        let line = r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","path":null,"password":""}"#;
+        for _ in 0..5 {
+            let m = message(handle_line(line, &c, &l, &|| true));
+            assert_eq!(m, "password wrong");
+        }
+        let m = message(handle_line(line, &c, &l, &|| true));
+        assert_eq!(m, "locked for 15 minutes");
+        // Open commands stay open while locked.
+        assert_eq!(
+            handle_line(r#"{"cmd":"Ping"}"#, &c, &l, &|| false),
+            Response::Pong
+        );
     }
 
     #[tokio::test]

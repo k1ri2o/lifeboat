@@ -159,6 +159,21 @@ fn only_timestamp_errors(stderr: &str) -> bool {
     seen
 }
 
+/// restic exits with code 12 when the repository password is wrong.
+const RESTIC_WRONG_PASSWORD: i32 = 12;
+
+/// Map the result of `restic cat config` to "password is right".
+fn probe_result(r: Result<Output, Error>) -> Result<bool, Error> {
+    match r {
+        Ok(_) => Ok(true),
+        Err(Error::Restic {
+            code: Some(RESTIC_WRONG_PASSWORD),
+            ..
+        }) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Wrapper around one restic repository.
 #[derive(Debug, Clone)]
 pub struct Engine {
@@ -272,6 +287,17 @@ impl Engine {
         }
     }
 
+    /// Is `password` the repository's password? Runs `restic cat config` with that password
+    /// (the engine's own configured password is not used). `Ok(false)` only for restic's
+    /// "wrong password" exit code; any other failure (missing repo, I/O) is an `Err`.
+    pub fn verify_password(&self, password: &str) -> Result<bool, Error> {
+        let probe = Engine {
+            password: password.to_string(),
+            ..self.clone()
+        };
+        probe_result(probe.run(["cat", "config"]))
+    }
+
     /// Verify repository integrity.
     pub fn check(&self) -> Result<(), Error> {
         self.run(["check"]).map(|_| ())
@@ -281,6 +307,21 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrong_password_is_exit_12() {
+        let wrong = Error::Restic {
+            code: Some(12),
+            stderr: "Fatal: wrong password or no key found".into(),
+        };
+        assert!(!probe_result(Err(wrong)).unwrap());
+        let missing = Error::Restic {
+            code: Some(10),
+            stderr: "repository does not exist".into(),
+        };
+        assert!(probe_result(Err(missing)).is_err());
+        assert!(probe_result(Err(Error::Parse("x".into()))).is_err());
+    }
 
     #[test]
     fn parses_snapshots() {

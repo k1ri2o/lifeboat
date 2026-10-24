@@ -2,8 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// GPT partition type GUID of the hidden Lifeboat partition (randomly generated, ours alone).
-pub const LIFEBOAT_TYPE_GUID: &str = "{6c1f3a52-8d4e-4b7a-9e21-5f0b8a7d3c14}";
+/// GPT type GUID "basic data". The Lifeboat partition uses it because Windows does not mount
+/// partitions with an unknown type as volumes; the partition is told apart by its unique
+/// partition GUID (see [`Config::partition_guid`](crate::config::Config)) and a marker file.
+pub const BASIC_DATA_TYPE_GUID: &str = "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}";
+
+/// Name of the marker file at the volume root; it holds the partition GUID.
+pub const MARKER_FILE: &str = "lifeboat.id";
 
 /// GPT partition attribute bit 62: hidden.
 pub const GPT_ATTR_HIDDEN: u64 = 1 << 62;
@@ -20,14 +25,21 @@ pub const fn is_hidden_attrs(attrs: u64) -> bool {
     attrs & lifeboat_attributes() == lifeboat_attributes()
 }
 
-/// Does this GPT type GUID (any case, with or without braces) belong to Lifeboat?
-pub fn is_lifeboat_type(guid: &str) -> bool {
-    let norm = |s: &str| {
-        s.trim()
-            .trim_matches(|c| c == '{' || c == '}')
-            .to_ascii_lowercase()
-    };
-    norm(guid) == norm(LIFEBOAT_TYPE_GUID)
+fn norm_guid(s: &str) -> String {
+    s.trim()
+        .trim_matches(|c| c == '{' || c == '}')
+        .to_ascii_lowercase()
+}
+
+/// Is this the basic data GPT type (any case, with or without braces)?
+pub fn is_basic_data_type(guid: &str) -> bool {
+    norm_guid(guid) == norm_guid(BASIC_DATA_TYPE_GUID)
+}
+
+/// Do two GUID strings name the same GUID (case and braces ignored, empty never matches)?
+pub fn same_guid(a: &str, b: &str) -> bool {
+    let a = norm_guid(a);
+    !a.is_empty() && a == norm_guid(b)
 }
 
 /// One partition of a disk.
@@ -39,11 +51,25 @@ pub struct PartitionInfo {
     /// GPT type GUID, empty on MBR disks.
     pub gpt_type: String,
     pub drive_letter: Option<char>,
+    /// Hidden flag (GPT attribute bit 62).
+    #[serde(default)]
+    pub is_hidden: bool,
+    /// Unique partition GUID, empty when unknown.
+    #[serde(default)]
+    pub guid: String,
 }
 
 impl PartitionInfo {
+    /// Looks like a Lifeboat partition: hidden basic-data partition without a drive letter.
+    /// This is only a heuristic for the guard ("do not wipe this disk"); the real identity is
+    /// [`PartitionInfo::has_guid`].
     pub fn is_lifeboat(&self) -> bool {
-        is_lifeboat_type(&self.gpt_type)
+        is_basic_data_type(&self.gpt_type) && self.is_hidden && self.drive_letter.is_none()
+    }
+
+    /// Is this the partition with the saved unique GUID?
+    pub fn has_guid(&self, guid: &str) -> bool {
+        same_guid(&self.guid, guid)
     }
 }
 
@@ -92,10 +118,36 @@ mod tests {
 
     #[test]
     fn type_guid_match() {
-        assert!(is_lifeboat_type("6C1F3A52-8D4E-4B7A-9E21-5F0B8A7D3C14"));
-        assert!(is_lifeboat_type(LIFEBOAT_TYPE_GUID));
-        assert!(!is_lifeboat_type("{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}"));
-        assert!(!is_lifeboat_type(""));
+        assert!(is_basic_data_type("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"));
+        assert!(is_basic_data_type(BASIC_DATA_TYPE_GUID));
+        assert!(!is_basic_data_type(
+            "{6c1f3a52-8d4e-4b7a-9e21-5f0b8a7d3c14}"
+        ));
+        assert!(!is_basic_data_type(""));
+    }
+
+    fn part(hidden: bool, letter: Option<char>, guid: &str) -> PartitionInfo {
+        PartitionInfo {
+            number: 1,
+            offset: 0,
+            size: 1,
+            gpt_type: BASIC_DATA_TYPE_GUID.into(),
+            drive_letter: letter,
+            is_hidden: hidden,
+            guid: guid.into(),
+        }
+    }
+
+    #[test]
+    fn identify_by_partition_guid() {
+        let p = part(true, None, "{AAAA0000-0000-0000-0000-000000000001}");
+        assert!(p.is_lifeboat());
+        assert!(p.has_guid("aaaa0000-0000-0000-0000-000000000001"));
+        assert!(!p.has_guid("{aaaa0000-0000-0000-0000-000000000002}"));
+        assert!(!p.has_guid(""));
+        assert!(!part(false, None, "x").is_lifeboat());
+        assert!(!part(true, Some('E'), "x").is_lifeboat());
+        assert!(!part(false, None, "").has_guid(""));
     }
 
     #[test]

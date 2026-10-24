@@ -14,6 +14,9 @@ pub struct Config {
     /// Repository password (temporary: real key handling comes later).
     #[serde(default)]
     pub password: String,
+    /// Unique GUID of the Lifeboat partition (returned by PrepareDisk); how the partition is found.
+    #[serde(default)]
+    pub partition_guid: String,
 }
 
 #[cfg(test)]
@@ -26,6 +29,7 @@ mod tests {
             folders: vec![PathBuf::from("Documents")],
             repo: PathBuf::from("repo"),
             password: "pw".into(),
+            partition_guid: "{abc}".into(),
         };
         let s = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<Config>(&s).unwrap(), c);

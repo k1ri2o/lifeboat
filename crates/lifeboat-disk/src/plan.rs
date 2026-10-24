@@ -1,7 +1,7 @@
 //! Internal-disk setup: shrink a volume, then create the hidden partition in the freed space.
 
 use crate::guard::{check, Op};
-use crate::ops::{create_partition_script, disk_by_number, find_lifeboat_volume};
+use crate::ops::{create_and_find, disk_by_number, PreparedVolume};
 use crate::ps::{self, quote};
 use crate::{Error, Result};
 use serde::Deserialize;
@@ -106,8 +106,8 @@ pub fn plan_shrink(drive_letter: char, lifeboat_size: u64) -> Result<ShrinkPlan>
 }
 
 /// Execute `plan`: shrink the volume, create, format and hide the partition. Returns the new
-/// volume GUID path. The guard is re-checked against the live disk first.
-pub fn execute_shrink(plan: &ShrinkPlan) -> Result<String> {
+/// volume and partition GUID. The guard is re-checked against the live disk first.
+pub fn execute_shrink(plan: &ShrinkPlan) -> Result<PreparedVolume> {
     let disk = disk_by_number(plan.disk_number)?;
     check(&disk, Op::InternalShrink, false)?;
     ps::run(&format!(
@@ -115,11 +115,7 @@ pub fn execute_shrink(plan: &ShrinkPlan) -> Result<String> {
         quote(&plan.drive_letter.to_string()),
         plan.new_size
     ))?;
-    ps::run(&create_partition_script(
-        plan.disk_number,
-        Some(plan.lifeboat_size),
-    ))?;
-    find_lifeboat_volume()?.ok_or_else(|| Error::NotFound("new Lifeboat volume".into()))
+    create_and_find(plan.disk_number, Some(plan.lifeboat_size))
 }
 
 #[cfg(test)]
