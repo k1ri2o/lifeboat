@@ -12,6 +12,7 @@ import {
   relativeTime,
   sizeLabel,
   snapshotLabel,
+  inlineTimeLabel,
 } from "./format";
 import { button, errorBox, h, icon, type Child } from "./ui";
 
@@ -175,7 +176,7 @@ function renderHome(body: HTMLElement, st: HomeState) {
           {},
           "Lifeboat saw a very large number of your files change at once. That is a sign of ransomware, a program that locks up files. To keep your older copies safe, no new backups are being made. Please do not delete anything.",
         ),
-        since ? h("p", { class: "muted" }, `This was noticed ${snapshotLabel(since)}.`) : null,
+        since ? h("p", { class: "muted" }, `This was noticed ${inlineTimeLabel(since)}.`) : null,
         h("div", { class: "actions", id: "paused-actions" }),
       ),
     );
@@ -186,7 +187,7 @@ function renderHome(body: HTMLElement, st: HomeState) {
         const safe = since ? lastBefore(snaps, since) : undefined;
         const holder = card.querySelector("#paused-actions")!;
         holder.replaceChildren(
-          button(safe ? `Restore files from before ${snapshotLabel(since!)}` : "Go to Restore", {
+          button(safe ? `Restore files from before ${inlineTimeLabel(since!)}` : "Go to Restore", {
             cls: "danger big",
             icon: "restore",
             onclick: () => {
@@ -330,7 +331,7 @@ async function renderRestore(body: HTMLElement, home: HomeState) {
 
   body.append(
     frozenSince && safe
-      ? h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Backups are paused"), h("p", { class: "muted" }, `We picked the last good copy, from ${snapshotLabel(safe.time)}, before the problem started.`)))
+      ? h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Backups are paused"), h("p", { class: "muted" }, `We picked the last good copy, from ${inlineTimeLabel(safe.time)}, before the problem started.`)))
       : "",
     step(1, "Pick a time", "Choose how far back to go.", list),
     step(

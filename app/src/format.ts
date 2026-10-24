@@ -122,3 +122,13 @@ export function isStale(lastRunSecs: number | null | undefined, now: Date = new 
   if (lastRunSecs == null) return false;
   return now.getTime() - lastRunSecs * 1000 > 24 * 3600 * 1000;
 }
+
+/** Same as snapshotLabel but for use inside a sentence: "today at 3 PM", "on Tuesday at 3 PM". */
+export function inlineTimeLabel(iso: string, now: Date = new Date()): string {
+  const label = snapshotLabel(iso, now);
+  const m = /^(Today|Yesterday) (.+)$/.exec(label);
+  if (m) return `${m[1].toLowerCase()} at ${m[2]}`;
+  const d = /^([A-Z][a-z]+day) (.+)$/.exec(label);
+  if (d) return `on ${d[1]} at ${d[2]}`;
+  return label === "Unknown time" ? "an unknown time" : `on ${label}`;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel } from "./format";
+import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -95,5 +95,13 @@ describe("folderParts / isStale", () => {
     expect(isStale(Math.floor(new Date(2026, 9, 22).getTime() / 1000), now)).toBe(true);
     expect(isStale(Math.floor(new Date(2026, 9, 24, 14).getTime() / 1000), now)).toBe(false);
     expect(isStale(null, now)).toBe(false);
+  });
+});
+
+describe("inlineTimeLabel", () => {
+  const now = new Date(2026, 9, 24, 21, 0);
+  it("lowercases today/yesterday for mid-sentence use", () => {
+    expect(inlineTimeLabel(new Date(2026, 9, 24, 20, 41).toISOString(), now)).toBe("today at 8:41 PM");
+    expect(inlineTimeLabel(new Date(2026, 9, 23, 15, 0).toISOString(), now)).toBe("yesterday at 3 PM");
   });
 });
