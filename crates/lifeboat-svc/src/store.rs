@@ -70,6 +70,17 @@ impl Store {
         self.path.parent().unwrap_or(Path::new("."))
     }
 
+    /// Create the data folder (and lock it to the service) so state files can be written
+    /// before the first config save. On a fresh install it does not exist yet.
+    pub fn ensure_dir(&self) -> io::Result<()> {
+        let dir = self.dir();
+        std::fs::create_dir_all(dir)?;
+        if self.secure {
+            secure_dir(dir)?;
+        }
+        Ok(())
+    }
+
     /// Load; a missing file is the empty config. A password that cannot be decrypted is an error.
     pub fn load(&self) -> io::Result<Config> {
         let bytes = match std::fs::read(&self.path) {

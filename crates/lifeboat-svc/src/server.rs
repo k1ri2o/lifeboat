@@ -56,6 +56,7 @@ impl State {
             return Ok(State::new(cfg, None, Paths::in_dir(&dir)));
         }
         let store = Store::production();
+        store.ensure_dir()?;
         let cfg = store.load()?;
         let paths = Paths::in_dir(store.dir());
         Ok(State::new(cfg, Some(store), paths))
