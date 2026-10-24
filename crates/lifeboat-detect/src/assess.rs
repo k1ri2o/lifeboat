@@ -38,6 +38,9 @@ pub const MASS_DELETE_MIN: usize = 10;
 pub const MASS_DELETE_ATTACK_SHARE: f64 = 0.50;
 pub const MASS_DELETE_ATTACK_MIN: usize = 20;
 pub const MASS_DELETE_ATTACK_COUNT: usize = 200;
+/// File count drop versus the baseline that is an attack: share of the old count, or absolute.
+pub const COUNT_DROP_SHARE: f64 = 0.30;
+pub const COUNT_DROP_ATTACK_COUNT: usize = 200;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChangeKind {
@@ -211,6 +214,20 @@ pub fn assess(baseline: &Baseline, cs: &ChangeSet) -> Verdict {
         }
     }
 
+    // Deleted files leave no trace in timestamps, so compare the file count now (`total_files`
+    // as scanned) with the count at the last clean run. Created files never count against this.
+    if baseline.file_count > 0 {
+        let drop = baseline.file_count.saturating_sub(cs.total_files);
+        if drop > COUNT_DROP_ATTACK_COUNT
+            || drop as f64 > COUNT_DROP_SHARE * baseline.file_count as f64
+        {
+            attack.push(format!(
+                "file count fell from {} to {}",
+                baseline.file_count, cs.total_files
+            ));
+        }
+    }
+
     let share = if cs.total_files > 0 {
         changed as f64 / cs.total_files as f64
     } else {
@@ -338,6 +355,42 @@ mod tests {
             Verdict::Suspicious { .. }
         ));
         assert_eq!(assess(&trained(), &del(3)), Verdict::Ok);
+    }
+
+    fn count_cs(now: usize) -> ChangeSet {
+        ChangeSet {
+            total_files: now,
+            changes: vec![],
+            window_secs: 0,
+            canary_hits: vec![],
+        }
+    }
+
+    fn with_count(n: usize) -> Baseline {
+        let mut b = trained();
+        b.file_count = n;
+        b
+    }
+
+    #[test]
+    fn file_count_drop_90_percent_is_attack() {
+        assert!(assess(&with_count(100), &count_cs(10)).is_attack());
+    }
+
+    #[test]
+    fn file_count_drop_10_percent_is_ok() {
+        assert_eq!(assess(&with_count(100), &count_cs(90)), Verdict::Ok);
+    }
+
+    #[test]
+    fn file_count_drop_250_of_10000_is_attack() {
+        assert!(assess(&with_count(10_000), &count_cs(9_750)).is_attack());
+    }
+
+    #[test]
+    fn file_count_growth_and_no_previous_count_are_ok() {
+        assert_eq!(assess(&with_count(100), &count_cs(500)), Verdict::Ok);
+        assert_eq!(assess(&with_count(0), &count_cs(1)), Verdict::Ok);
     }
 
     #[test]
