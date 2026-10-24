@@ -8,7 +8,7 @@ pub enum Op {
     /// Initialise an empty external disk and create the hidden partition.
     PrepareExternal,
     /// Shrink a volume on the disk and create the hidden partition (the only op allowed on
-    /// the boot/system disk).
+    /// a disk that holds other drives).
     InternalShrink,
     SetOffline,
     SetOnline,
@@ -18,8 +18,10 @@ pub enum Op {
 pub enum GuardError {
     /// Boot or system disk and the op is not the explicit internal shrink.
     BootOrSystemDisk(u32),
-    /// Internal shrink on a disk that is neither boot nor system.
+    /// Internal shrink on a disk with no drive on it to make room from.
     NotInternalDisk(u32),
+    /// Offline/online on a disk that also holds other drives (they would vanish).
+    SharedDisk(u32),
     /// The disk already has a Lifeboat partition.
     AlreadyHasLifeboat(u32),
     /// External prepare on a disk that already has partitions.
@@ -33,7 +35,10 @@ impl std::fmt::Display for GuardError {
                 write!(f, "disk {n} holds Windows (boot/system)")
             }
             GuardError::NotInternalDisk(n) => {
-                write!(f, "disk {n} is not the system disk; use external setup")
+                write!(f, "disk {n} has no drive on it to make room from")
+            }
+            GuardError::SharedDisk(n) => {
+                write!(f, "disk {n} also holds other drives; it must stay online")
             }
             GuardError::AlreadyHasLifeboat(n) => {
                 write!(f, "disk {n} already has a Lifeboat partition")
@@ -53,6 +58,9 @@ pub fn check(disk: &DiskInfo, op: Op, reuse: bool) -> Result<(), GuardError> {
             if protected {
                 return Err(GuardError::BootOrSystemDisk(disk.number));
             }
+            if disk.is_shared() {
+                return Err(GuardError::SharedDisk(disk.number));
+            }
         }
         Op::PrepareExternal => {
             if protected {
@@ -68,7 +76,9 @@ pub fn check(disk: &DiskInfo, op: Op, reuse: bool) -> Result<(), GuardError> {
             }
         }
         Op::InternalShrink => {
-            if !protected {
+            // Any internal disk with a drive on it (C: on the Windows disk, or D: on a
+            // second drive). The disk then counts as shared and is never taken offline.
+            if !disk.is_shared() {
                 return Err(GuardError::NotInternalDisk(disk.number));
             }
             if disk.has_lifeboat_partition() && !reuse {
@@ -133,6 +143,21 @@ mod tests {
             check(&disk(false, false, vec![]), Op::InternalShrink, false),
             Err(GuardError::NotInternalDisk(3))
         );
+        // A second internal drive holding D: may make room for Lifeboat...
+        let second = disk(false, false, vec![user_part()]);
+        assert_eq!(check(&second, Op::InternalShrink, false), Ok(()));
+        // ...but must never be taken offline afterwards, or D: would vanish.
+        assert_eq!(
+            check(&second, Op::SetOffline, true),
+            Err(GuardError::SharedDisk(3))
+        );
+        assert_eq!(
+            check(&second, Op::SetOnline, true),
+            Err(GuardError::SharedDisk(3))
+        );
+        let with_lb = disk(false, false, vec![user_part(), part(BASIC_DATA_TYPE_GUID)]);
+        assert!(check(&with_lb, Op::InternalShrink, false).is_err());
+        assert!(check(&with_lb, Op::SetOffline, true).is_err());
     }
 
     #[test]
@@ -167,7 +192,7 @@ mod tests {
 
     #[test]
     fn offline_online_ok_on_data_disk() {
-        let d = disk(false, false, vec![]);
+        let d = disk(false, false, vec![part(BASIC_DATA_TYPE_GUID)]);
         assert_eq!(check(&d, Op::SetOffline, false), Ok(()));
         assert_eq!(check(&d, Op::SetOnline, false), Ok(()));
     }
