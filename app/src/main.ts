@@ -404,6 +404,18 @@ function diskKind(d: Disk): "external" | "internal" {
   return /usb/i.test(d.bus_type) ? "external" : "internal";
 }
 
+/** Lettered parts (C:, D:...) on a drive, biggest first. Lifeboat shrinks one of them. */
+function lettersOn(d: Disk): { letter: string; size: number }[] {
+  return d.partitions
+    .filter((p) => p.drive_letter)
+    .map((p) => ({ letter: p.drive_letter!.replace(":", "").toUpperCase(), size: p.size }))
+    .sort((a, b) => b.size - a.size);
+}
+
+function internalLabel(d: Disk): string {
+  return d.is_boot || d.is_system ? "The drive Windows runs on" : "A second drive in this computer";
+}
+
 interface Wizard {
   step: 1 | 2 | 3;
   disk?: Disk;
@@ -415,7 +427,7 @@ interface Wizard {
   password2: string;
 }
 
-const wiz: Wizard = { step: 1, letter: "C", gb: "100", erase: false, folders: [], password: "", password2: "" };
+const wiz: Wizard = { step: 1, letter: "", gb: "100", erase: false, folders: [], password: "", password2: "" };
 
 function stepper(current: number): HTMLElement {
   const names = ["Backup drive", "Folders", "Password"];
@@ -455,7 +467,9 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
   if (!disks.length) {
     return holder.replaceChildren(h("div", { class: "card empty-state" }, icon("usb", 32), h("p", {}, "We could not find a drive. Plug in a USB drive and try again."), button("Look again", { icon: "refresh", onclick: redraw })));
   }
-  disks.sort((a, b) => Number(diskKind(b) === "external") - Number(diskKind(a) === "external"));
+  // USB drives first, then second internal drives, then the Windows drive.
+  const rank = (d: Disk) => (diskKind(d) === "external" ? 0 : d.is_boot || d.is_system ? 2 : 1);
+  disks.sort((a, b) => rank(a) - rank(b));
   const detail = h("div");
   const list = h("div", { class: "choices", role: "radiogroup", "aria-label": "Drives" });
   const next = button("Continue", { cls: "primary big" });
@@ -470,14 +484,38 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
       next.disabled = !wiz.erase;
       detail.replaceChildren(h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Everything on this drive will be erased"), h("label", { class: "check", for: "erase" }, cb, "I understand and I have nothing on this drive I need."))));
     } else {
-      const letter = h("input", { type: "text", id: "letter", maxlength: "1", value: wiz.letter }) as HTMLInputElement;
+      const parts = lettersOn(d);
+      if (!parts.length) {
+        next.disabled = true;
+        return detail.replaceChildren(h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Lifeboat cannot use this drive"), h("p", { class: "muted" }, "It has no part with a drive letter (like C: or D:) that Lifeboat could make smaller. Pick another drive."))));
+      }
+      if (!parts.some((p) => p.letter === wiz.letter)) wiz.letter = parts[0].letter;
       const gb = h("input", { type: "number", id: "gb", min: "1", value: wiz.gb }) as HTMLInputElement;
-      letter.addEventListener("input", () => (wiz.letter = letter.value));
       gb.addEventListener("input", () => (wiz.gb = gb.value));
+      const windowsDrive = d.is_boot || d.is_system;
+      const warn = windowsDrive
+        ? h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "This is less safe"), h("p", { class: "muted" }, "This is the same drive Windows is on. If that drive fails, your files and the backups are lost together. A USB drive or a second drive is a better choice.")))
+        : h("div", { class: "notice info" }, icon("info", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Good choice"), h("p", { class: "muted" }, "This is a different drive from the one Windows is on, so the backups survive if the Windows drive fails. Nothing on it is deleted: Lifeboat only borrows some of its free space.")));
+      let where: HTMLElement;
+      if (parts.length === 1) {
+        where = h("p", {}, `Lifeboat will take the space from drive ${parts[0].letter}: on this drive. Your files on ${parts[0].letter}: stay where they are.`);
+      } else {
+        where = h(
+          "div",
+          { class: "choices", role: "radiogroup", "aria-label": "Drive letters" },
+          ...parts.map((p) => {
+            const r = h("input", { type: "radio", name: "letter", id: `l-${p.letter}`, checked: p.letter === wiz.letter });
+            r.addEventListener("change", () => ((wiz.letter = p.letter), drawDetail()));
+            return h("label", { class: `choice${p.letter === wiz.letter ? " selected" : ""}`, for: `l-${p.letter}` }, r, h("span", { class: "grow" }, h("span", { class: "choice-title" }, `Drive ${p.letter}:`), h("span", { class: "muted small" }, sizeLabel(p.size))));
+          }),
+        );
+      }
       detail.replaceChildren(
-        h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "This is less safe"), h("p", { class: "muted" }, "Lifeboat has to make an existing drive smaller to make room. If this computer breaks, the backups are lost with it. A USB drive is a better choice."))),
-        h("div", { class: "fields" }, h("div", {}, h("label", { for: "letter" }, "Which drive letter should be made smaller?"), letter), h("div", {}, h("label", { for: "gb" }, "How many GB should be set aside?"), gb)),
-        h("p", { class: "muted small" }, "Pick more than the folders you want to protect take up. It must fit in the free space on that drive; if it does not, Lifeboat will tell you the most it can use."),
+        warn,
+        parts.length > 1 ? h("p", { class: "muted" }, "Which part of this drive should Lifeboat take space from?") : "",
+        where,
+        h("div", { class: "fields" }, h("div", {}, h("label", { for: "gb" }, "How many GB should be set aside for backups?"), gb)),
+        h("p", { class: "muted small" }, `Pick more than the folders you want to protect take up. It must fit in the free space on ${wiz.letter}:; if it does not, Lifeboat will tell you the most it can use.`),
       );
     }
   };
@@ -497,14 +535,14 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
           { class: `choice${wiz.disk?.number === d.number ? " selected" : ""}`, for: `d-${d.number}` },
           radio,
           icon(ext ? "usb" : "drive", 24),
-          h("span", { class: "grow" }, h("span", { class: "choice-title" }, d.model || "Drive"), h("span", { class: "muted small" }, `${sizeLabel(d.size)} - ${ext ? "USB drive" : "Inside this computer"}`)),
+          h("span", { class: "grow" }, h("span", { class: "choice-title" }, d.model || "Drive"), h("span", { class: "muted small" }, `${sizeLabel(d.size)} - ${ext ? "USB drive" : internalLabel(d)}${lettersOn(d).length ? ` (${lettersOn(d).map((p) => p.letter + ":").join(", ")})` : ""}`)),
           ext ? h("span", { class: "pill ok" }, "Recommended") : null,
         );
       }),
     );
   next.addEventListener("click", () => ((wiz.step = 2), redraw()));
   holder.replaceChildren(
-    h("p", { class: "hint" }, icon("info", 18), "A USB drive that stays plugged in is the safest choice. If your computer breaks, your backups survive."),
+    h("p", { class: "hint" }, icon("info", 18), "Best: a USB drive that stays plugged in. Next best: a second drive in this computer. Avoid the drive Windows runs on: if it fails, the backups go with it."),
     list,
     detail,
     h("div", { class: "actions" }, next),
