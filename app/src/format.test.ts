@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { keyGroups, lastBackupLine, lastBefore, relativeTime, sizeLabel, snapshotLabel } from "./format";
+import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -73,5 +73,27 @@ describe("keyGroups", () => {
   it("copes with empty and very short keys", () => {
     expect(keyGroups("")).toEqual([]);
     expect(keyGroups("AB")).toEqual(["A", "B"]);
+  });
+});
+
+describe("nextBackupLine", () => {
+  const secs = (d: number, h: number, m = 0) => Math.floor(new Date(2026, 9, d, h, m).getTime() / 1000);
+  it("counts down to the next hourly run", () => {
+    expect(nextBackupLine(secs(24, 14, 50), now)).toBe("Next: in about 50 minutes");
+    expect(nextBackupLine(secs(24, 14, 0), now)).toBe("Next: very soon");
+    expect(nextBackupLine(secs(24, 10, 0), now)).toBe("Next: very soon");
+    expect(nextBackupLine(null, now)).toMatch(/Back up now/);
+  });
+});
+
+describe("folderParts / isStale", () => {
+  it("splits a Windows path", () => {
+    expect(folderParts("C:\\Users\\Dad\\Documents")).toEqual({ name: "Documents", where: "C:\\Users\\Dad" });
+    expect(folderParts("D:\\Photos\\")).toEqual({ name: "Photos", where: "D:\\" });
+  });
+  it("flags backups older than a day", () => {
+    expect(isStale(Math.floor(new Date(2026, 9, 22).getTime() / 1000), now)).toBe(true);
+    expect(isStale(Math.floor(new Date(2026, 9, 24, 14).getTime() / 1000), now)).toBe(false);
+    expect(isStale(null, now)).toBe(false);
   });
 });
