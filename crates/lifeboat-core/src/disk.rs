@@ -90,6 +90,16 @@ impl DiskInfo {
     pub fn has_lifeboat_partition(&self) -> bool {
         self.partitions.iter().any(PartitionInfo::is_lifeboat)
     }
+
+    /// Does anything besides Lifeboat live on this disk (Windows, or a drive such as D:)?
+    /// A shared disk must never be taken offline, or that drive would vanish.
+    pub fn is_shared(&self) -> bool {
+        self.is_boot
+            || self.is_system
+            || self.partitions.iter().any(|p| {
+                !p.is_lifeboat() && (p.drive_letter.is_some() || is_basic_data_type(&p.gpt_type))
+            })
+    }
 }
 
 /// How the UI asks the service to prepare a disk.
@@ -148,6 +158,28 @@ mod tests {
         assert!(!part(false, None, "x").is_lifeboat());
         assert!(!part(true, Some('E'), "x").is_lifeboat());
         assert!(!part(false, None, "").has_guid(""));
+    }
+
+    #[test]
+    fn shared_disk() {
+        let mut d = DiskInfo {
+            number: 1,
+            model: String::new(),
+            size: 0,
+            bus_type: "SATA".into(),
+            is_boot: false,
+            is_system: false,
+            partitions: vec![part(true, None, "{L}")],
+        };
+        assert!(!d.is_shared(), "only Lifeboat on it");
+        d.partitions.push(part(false, Some('D'), "{D}"));
+        assert!(d.is_shared(), "D: lives here");
+        d.partitions.pop();
+        d.partitions.push(part(false, None, "{X}"));
+        assert!(d.is_shared(), "visible data partition without a letter");
+        d.partitions.pop();
+        d.is_boot = true;
+        assert!(d.is_shared());
     }
 
     #[test]

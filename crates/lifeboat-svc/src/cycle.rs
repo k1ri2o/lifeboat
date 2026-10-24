@@ -352,14 +352,15 @@ impl RealEnv {
     }
 }
 
-/// Disk number holding the partition with `guid`, and whether it is a boot/system disk.
+/// Disk number holding the partition with `guid`, and whether it is shared
+/// (holds Windows or another drive, so it must never be taken offline).
 pub fn disk_of(guid: &str) -> Option<(u32, bool)> {
     let disks = lifeboat_disk::list_disks().ok()?;
     disks.into_iter().find_map(|d| {
         d.partitions
             .iter()
             .any(|p| lifeboat_core::disk::same_guid(&p.guid, guid))
-            .then_some((d.number, d.is_boot || d.is_system))
+            .then_some((d.number, d.is_shared()))
     })
 }
 
