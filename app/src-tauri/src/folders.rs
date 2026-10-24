@@ -87,7 +87,11 @@ mod tests {
     #[test]
     fn does_not_overwrite_a_service_list() {
         let f = temp("nonempty", Some(r#"["C:\\Old"]"#));
-        let r = migrate(&f, || Some(vec!["D:/New".into()]), |_| panic!("must not send"));
+        let r = migrate(
+            &f,
+            || Some(vec!["D:/New".into()]),
+            |_| panic!("must not send"),
+        );
         assert_eq!(r, Migration::Done);
         assert!(!f.exists());
     }
