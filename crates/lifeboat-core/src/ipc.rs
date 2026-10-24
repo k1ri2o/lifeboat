@@ -1,6 +1,7 @@
 //! IPC protocol between the UI and the service: one JSON object per line over
 //! the named pipe [`PIPE_NAME`].
 
+use crate::config::{CheckResult, PendingDelete};
 use crate::disk::{DiskInfo, PrepareMode};
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +34,34 @@ pub enum Request {
         disk: u32,
         mode: PrepareMode,
     },
+    /// First setup only: create the repository with `password`, add a recovery key, plant
+    /// canaries in `folders`. Needs an elevated administrator; refused when a repo exists.
+    InitRepo {
+        password: String,
+        folders: Vec<String>,
+    },
+    /// Queue snapshot deletes; they run after a delay (7 days). Needs the password.
+    DeleteSnapshots {
+        password: String,
+        ids: Vec<String>,
+    },
+    /// Cancel every queued delete. Needs the password.
+    CancelDelete {
+        password: String,
+    },
+    /// Clear the freeze after an alert. Needs the password.
+    Unfreeze {
+        password: String,
+    },
+    /// The folders the service backs up.
+    ListFolders,
+    /// Replace the folder list. Adding folders needs no password; any change that removes a
+    /// folder needs `password` (malware must not be able to silently stop backups).
+    SetFolders {
+        folders: Vec<String>,
+        #[serde(default)]
+        password: Option<String>,
+    },
 }
 
 /// A snapshot as shown to the UI.
@@ -52,11 +81,37 @@ pub enum Response {
     Status {
         /// Service version.
         version: String,
-        /// Whether backups are currently frozen (always false until M4).
+        /// Whether backups are currently frozen.
         frozen: bool,
         /// When the freeze started (RFC 3339), if frozen and known.
         #[serde(default)]
         frozen_since: Option<String>,
+        /// Why backups were frozen.
+        #[serde(default)]
+        freeze_reasons: Vec<String>,
+        /// The backup volume shares a physical disk with a backed-up folder.
+        #[serde(default)]
+        same_physical_disk: bool,
+        /// Unix seconds of the last successful backup cycle.
+        #[serde(default)]
+        last_run: Option<u64>,
+        /// Unix seconds of the last backup (same as `last_run`).
+        #[serde(default)]
+        last_backup: Option<u64>,
+        #[serde(default)]
+        last_check: Option<CheckResult>,
+        #[serde(default)]
+        pending_deletes: Vec<PendingDelete>,
+    },
+    /// A request without data finished.
+    Done,
+    /// The backed-up folders.
+    Folders {
+        folders: Vec<String>,
+    },
+    /// The repository was created. `recovery_key` is shown once and never stored.
+    RepoInitialized {
+        recovery_key: String,
     },
     BackupDone {
         snapshot: String,
@@ -146,8 +201,17 @@ mod tests {
     fn status_roundtrip() {
         let r = Response::Status {
             version: "0.1.0".into(),
-            frozen: false,
-            frozen_since: None,
+            frozen: true,
+            frozen_since: Some("2026-01-01T00:00:00Z".into()),
+            freeze_reasons: vec!["canary".into()],
+            same_physical_disk: true,
+            last_run: Some(1),
+            last_backup: Some(1),
+            last_check: None,
+            pending_deletes: vec![PendingDelete {
+                id: "x".into(),
+                due: 2,
+            }],
         };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
@@ -162,6 +226,74 @@ mod tests {
             Response::Status {
                 frozen: true,
                 frozen_since: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn m5_requests_roundtrip() {
+        for r in [
+            Request::InitRepo {
+                password: "p".into(),
+                folders: vec!["C:/Docs".into()],
+            },
+            Request::DeleteSnapshots {
+                password: "p".into(),
+                ids: vec!["a".into()],
+            },
+            Request::CancelDelete {
+                password: "p".into(),
+            },
+            Request::Unfreeze {
+                password: "p".into(),
+            },
+            Request::ListFolders,
+            Request::SetFolders {
+                folders: vec!["C:/Docs".into()],
+                password: Some("p".into()),
+            },
+        ] {
+            let s = serde_json::to_string(&r).unwrap();
+            assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), r);
+        }
+        let r = Response::RepoInitialized {
+            recovery_key: "K".into(),
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
+        let r = Response::Folders {
+            folders: vec!["C:/Docs".into()],
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
+        assert_eq!(
+            serde_json::to_string(&Response::Done).unwrap(),
+            r#"{"reply":"Done"}"#
+        );
+    }
+
+    #[test]
+    fn set_folders_password_is_optional() {
+        let r: Request =
+            serde_json::from_str(r#"{"cmd":"SetFolders","folders":["C:/A"]}"#).unwrap();
+        assert_eq!(
+            r,
+            Request::SetFolders {
+                folders: vec!["C:/A".into()],
+                password: None
+            }
+        );
+    }
+
+    #[test]
+    fn old_status_without_new_fields_parses() {
+        let r: Response =
+            serde_json::from_str(r#"{"reply":"Status","version":"1","frozen":false}"#).unwrap();
+        assert!(matches!(
+            r,
+            Response::Status {
+                same_physical_disk: false,
                 ..
             }
         ));

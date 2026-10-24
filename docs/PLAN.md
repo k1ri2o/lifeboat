@@ -56,6 +56,15 @@ before the alert.
 - **Pipe gating:** PrepareDisk and Restore need the backup password (checked by the service against
   the repo; 5 wrong tries lock it for 15 minutes), and PrepareDisk also needs an elevated admin client
   (checked by impersonating the pipe client). Backup, status and listing stay open.
+- **Gates in detail:** PrepareDisk needs admin, plus the password once a repo exists. InitRepo needs admin,
+  is refused if a repo exists, and returns a one-time recovery key (an extra restic key, never stored).
+  DeleteSnapshots (executed after 7 days), CancelDelete, Unfreeze and Restore need the password.
+  ListFolders is open; SetFolders is open for adding folders but needs the password to remove one.
+  Status reports last_run, last_backup, last_check, freeze reasons and pending deletes.
+- **Cycle:** mount, back up, tag and prune per retention, unmount, always taking the disk offline.
+  An attack verdict makes a pre-alert tag and no snapshot, and freezes; retention and deletes are
+  skipped while frozen. A weekly `restic check --read-data-subset=5%` records its result. Config is
+  saved in ProgramData with the password protected by DPAPI.
 - **Backup engine: restic** (open source, BSD-2, audited design, encrypted, deduplicated snapshots),
   bundled as one exe. We don't write our own crypto.
 - **Watching:** file-change events with a 10-minute quiet period, plus a scheduled hourly run.

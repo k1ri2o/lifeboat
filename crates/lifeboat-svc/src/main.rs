@@ -1,9 +1,14 @@
 //! Lifeboat Windows service. Usage: `lifeboat-svc install|uninstall|run`.
 
+mod cycle;
+mod dpapi;
+mod scheduler;
 mod security;
 mod server;
+mod store;
 
 use std::ffi::OsString;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use windows_service::service::{
@@ -57,7 +62,9 @@ fn run_console() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
             let _ = tx.send(true);
         });
-        server::serve_default(rx).await
+        let st = Arc::new(server::State::load_default()?);
+        tokio::spawn(scheduler::run(st.clone(), rx.clone()));
+        server::serve_default(st, rx).await
     })?;
     Ok(())
 }
@@ -92,7 +99,11 @@ fn run_service() -> windows_service::Result<()> {
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
     ))?;
-    let _ = runtime().block_on(server::serve_default(rx));
+    let _ = runtime().block_on(async {
+        let st = Arc::new(server::State::load_default()?);
+        tokio::spawn(scheduler::run(st.clone(), rx.clone()));
+        server::serve_default(st, rx).await
+    });
     status_handle
         .set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty()))?;
     Ok(())

@@ -61,9 +61,11 @@ fn content(i: usize) -> Vec<u8> {
 
 fn set_hidden(path: &Path, hidden: bool) {
     if cfg!(windows) {
-        let flag = if hidden { "+h" } else { "-h" };
+        // Hidden + system, so Explorer shows them only with protected OS files enabled.
+        let (h, s) = if hidden { ("+h", "+s") } else { ("-h", "-s") };
         let _ = std::process::Command::new("attrib")
-            .arg(flag)
+            .arg(h)
+            .arg(s)
             .arg(path)
             .output();
     }

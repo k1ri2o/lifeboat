@@ -55,6 +55,44 @@ pub struct Snapshot {
     pub paths: Vec<String>,
     #[serde(default)]
     pub hostname: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Tag put on the latest snapshot when an attack is detected; retention never removes it.
+pub const PRE_ALERT_TAG: &str = "pre-alert";
+
+/// Retention policy arguments for `restic forget` (kept in one place so it is tested).
+pub fn retention_args() -> Vec<String> {
+    [
+        "forget",
+        "--keep-hourly",
+        "48",
+        "--keep-daily",
+        "30",
+        "--keep-weekly",
+        "12",
+        "--keep-monthly",
+        "24",
+        "--keep-tag",
+        PRE_ALERT_TAG,
+        "--prune",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Arguments of the weekly integrity check.
+pub fn check_subset_args() -> Vec<String> {
+    vec!["check".into(), "--read-data-subset=5%".into()]
+}
+
+/// Arguments to delete specific snapshots and free their data.
+pub fn forget_ids_args(ids: &[String]) -> Vec<String> {
+    let mut v = vec!["forget".to_string(), "--prune".to_string()];
+    v.extend(ids.iter().cloned());
+    v
 }
 
 /// Parse the output of `restic snapshots --json`.
@@ -298,6 +336,45 @@ impl Engine {
         probe_result(probe.run(["cat", "config"]))
     }
 
+    /// Add a tag to a snapshot.
+    pub fn tag_add(&self, snapshot_id: &str, tag: &str) -> Result<(), Error> {
+        self.run(["tag", "--add", tag, snapshot_id]).map(|_| ())
+    }
+
+    /// Apply the retention policy (never removes `pre-alert` snapshots) and prune.
+    pub fn apply_retention(&self) -> Result<(), Error> {
+        self.run(retention_args()).map(|_| ())
+    }
+
+    /// Delete the given snapshots and prune.
+    pub fn forget_snapshots(&self, ids: &[String]) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.run(forget_ids_args(ids)).map(|_| ())
+    }
+
+    /// Integrity check that also reads a 5% sample of the data.
+    pub fn check_subset(&self) -> Result<(), Error> {
+        self.run(check_subset_args()).map(|_| ())
+    }
+
+    /// Add a second password (the recovery key). It goes through a short-lived password file
+    /// because restic has no other non-interactive way; the file is removed afterwards.
+    pub fn add_key(&self, new_password: &str) -> Result<(), Error> {
+        let mut path = std::env::temp_dir();
+        path.push(format!("lifeboat-key-{}.tmp", std::process::id()));
+        std::fs::write(&path, new_password)?;
+        let r = self.run([
+            OsStr::new("key"),
+            OsStr::new("add"),
+            OsStr::new("--new-password-file"),
+            path.as_os_str(),
+        ]);
+        let _ = std::fs::remove_file(&path);
+        r.map(|_| ())
+    }
+
     /// Verify repository integrity.
     pub fn check(&self) -> Result<(), Error> {
         self.run(["check"]).map(|_| ())
@@ -307,6 +384,28 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_keeps_pre_alert_and_prunes() {
+        let a = retention_args().join(" ");
+        assert_eq!(
+            a,
+            "forget --keep-hourly 48 --keep-daily 30 --keep-weekly 12 --keep-monthly 24 --keep-tag pre-alert --prune"
+        );
+        assert_eq!(check_subset_args(), ["check", "--read-data-subset=5%"]);
+        assert_eq!(
+            forget_ids_args(&["a".into(), "b".into()]),
+            ["forget", "--prune", "a", "b"]
+        );
+    }
+
+    #[test]
+    fn snapshot_tags_parse() {
+        let j = r#"[{"time":"t","id":"a","tags":["pre-alert"]},{"time":"t","id":"b"}]"#;
+        let s = parse_snapshots(j).unwrap();
+        assert_eq!(s[0].tags, ["pre-alert"]);
+        assert!(s[1].tags.is_empty());
+    }
 
     #[test]
     fn wrong_password_is_exit_12() {
