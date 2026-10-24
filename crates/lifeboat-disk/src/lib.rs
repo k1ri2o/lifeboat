@@ -31,6 +31,8 @@ pub enum Error {
     Command(String),
     /// Output could not be parsed.
     Parse(String),
+    /// The request itself can't be done (too big, bad letter); the text is for the user.
+    Invalid(String),
     NotFound(String),
     Io(std::io::Error),
 }
@@ -41,6 +43,7 @@ impl std::fmt::Display for Error {
             Error::Guard(e) => write!(f, "refused: {e}"),
             Error::Command(e) => write!(f, "command failed: {e}"),
             Error::Parse(e) => write!(f, "bad command output: {e}"),
+            Error::Invalid(e) => write!(f, "{e}"),
             Error::NotFound(e) => write!(f, "not found: {e}"),
             Error::Io(e) => write!(f, "io: {e}"),
         }

@@ -523,7 +523,7 @@ fn prepare(disk: u32, mode: PrepareMode) -> lifeboat_disk::Result<lifeboat_disk:
         } => {
             let plan = lifeboat_disk::plan_shrink(drive_letter, size_bytes)?;
             if plan.disk_number != disk {
-                return Err(lifeboat_disk::Error::Parse(format!(
+                return Err(lifeboat_disk::Error::Invalid(format!(
                     "volume {drive_letter}: is on disk {}, not disk {disk}",
                     plan.disk_number
                 )));

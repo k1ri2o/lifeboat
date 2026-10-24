@@ -39,4 +39,12 @@ describe("friendlyError", () => {
     expect(f.title).toBe("Something went wrong.");
     expect(f.details).toContain("0xDEADBEEF");
   });
+  it("explains a drive that cannot spare the asked space, with the most it can", () => {
+    const f = friendlyError({ kind: "service", message: "bad command output: not enough free space on C: can free at most 8.6 GiB, asked for 10.0 GiB" });
+    expect(f.title).toBe("Drive C: does not have room for 10 GB of backups.");
+    expect(f.next).toMatch(/at most 8 GB/);
+    expect(f.next).toMatch(/USB drive/);
+    const none = friendlyError({ kind: "service", message: "not enough free space on D: can free at most 0.3 GiB, asked for 5.0 GiB" });
+    expect(none.next).toMatch(/almost no free room on D:/);
+  });
 });
