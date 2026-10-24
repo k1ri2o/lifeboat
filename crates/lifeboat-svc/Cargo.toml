@@ -1,0 +1,11 @@
+[package]
+name = "lifeboat-svc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lifeboat-core.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+windows-service = "0.8"
