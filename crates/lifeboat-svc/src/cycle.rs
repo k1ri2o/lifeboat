@@ -91,6 +91,9 @@ fn load_baseline(path: &Path) -> Baseline {
 
 fn save_baseline(path: &Path, b: &Baseline) -> std::io::Result<()> {
     let json = serde_json::to_vec_pretty(b).map_err(std::io::Error::other)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, path)
@@ -214,6 +217,9 @@ pub fn load_canaries(path: &Path) -> Vec<CanaryManifest> {
 
 pub fn save_canaries(path: &Path, m: &[CanaryManifest]) -> std::io::Result<()> {
     let json = serde_json::to_vec_pretty(m).map_err(std::io::Error::other)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, path)
@@ -226,7 +232,7 @@ pub fn plant_canaries(folders: &[PathBuf], path: &Path) -> Result<(), String> {
         let m = create_canaries(f).map_err(|e| format!("canaries in {}: {e}", f.display()))?;
         all.push(m);
     }
-    save_canaries(path, &all).map_err(|e| e.to_string())
+    save_canaries(path, &all).map_err(|e| format!("saving {}: {e}", path.display()))
 }
 
 /// Plant canaries in every existing watched folder that has none recorded yet.
@@ -777,5 +783,20 @@ mod tests {
         std::fs::write(f, b"encrypted").unwrap();
         let out = run_cycle(&env, &mut cfg, &p);
         assert!(matches!(out, Outcome::Attack { .. }), "{out:?}");
+    }
+}
+
+#[cfg(test)]
+mod fresh_install_tests {
+    use super::*;
+
+    #[test]
+    fn plant_canaries_creates_missing_data_dir() {
+        let d = tempfile::tempdir().unwrap();
+        let folder = d.path().join("docs");
+        std::fs::create_dir(&folder).unwrap();
+        let manifest = d.path().join("ProgramData").join("Lifeboat").join("canaries.json");
+        plant_canaries(&[folder], &manifest).unwrap();
+        assert_eq!(load_canaries(&manifest).len(), 1);
     }
 }
