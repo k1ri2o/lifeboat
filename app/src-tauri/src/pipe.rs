@@ -60,9 +60,27 @@ fn call(pipe: &str, req: &Request) -> Result<Response, ApiError> {
     match client::request_on(pipe, req)? {
         Response::Error { message } => Err(ApiError {
             kind: ErrorKind::Service,
-            message,
+            message: friendly(&message),
         }),
         other => Ok(other),
+    }
+}
+
+/// Turn the service's short refusals into plain words for the user.
+pub fn friendly(message: &str) -> String {
+    if message == "password wrong" {
+        "That password is not right. Please try again.".into()
+    } else if message == "needs administrator" {
+        "This step needs administrator permission. Close Lifeboat, then open it again with \"Run as administrator\" and repeat the setup.".into()
+    } else if let Some(m) = message
+        .strip_prefix("locked for ")
+        .and_then(|r| r.strip_suffix(" minutes"))
+    {
+        format!("Too many wrong passwords. Please wait {m} minutes and try again.")
+    } else if let Some(r) = message.strip_prefix("cannot check password") {
+        format!("Lifeboat could not check the password{r}")
+    } else {
+        message.to_string()
     }
 }
 
@@ -100,10 +118,9 @@ pub fn snapshots(pipe: &str) -> Result<Vec<SnapshotInfo>, ApiError> {
     }
 }
 
-// `password` is accepted already so callers do not change when the service starts requiring it
-// (issue #13); until then it is not sent.
-pub fn restore(pipe: &str, snapshot: &str, target: &str, _password: &str) -> Result<(), ApiError> {
+pub fn restore(pipe: &str, snapshot: &str, target: &str, password: &str) -> Result<(), ApiError> {
     let req = Request::Restore {
+        password: password.to_string(),
         snapshot: snapshot.to_string(),
         target: target.to_string(),
         path: None,
@@ -125,10 +142,15 @@ pub fn prepare(
     pipe: &str,
     disk: u32,
     mode: PrepareMode,
-    _password: &str,
+    password: &str,
 ) -> Result<String, ApiError> {
-    match call(pipe, &Request::PrepareDisk { disk, mode })? {
-        Response::Prepared { volume_path } => Ok(volume_path),
+    let req = Request::PrepareDisk {
+        password: password.to_string(),
+        disk,
+        mode,
+    };
+    match call(pipe, &req)? {
+        Response::Prepared { volume_path, .. } => Ok(volume_path),
         r => Err(unexpected(r)),
     }
 }
@@ -219,8 +241,12 @@ mod tests {
     async fn restore_sends_snapshot_and_target() {
         let (pipe, h) = fake_server("restore", 1, |req| match req {
             Request::Restore {
-                snapshot, target, ..
+                snapshot,
+                target,
+                password,
+                ..
             } => {
+                assert_eq!(password, "pw");
                 assert_eq!(snapshot, "abc");
                 assert_eq!(target, r"D:\Back");
                 Response::Restored
@@ -242,6 +268,15 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::Service);
         assert_eq!(e.message, "wrong password");
         h.await.unwrap();
+    }
+
+    #[test]
+    fn refusals_become_plain_words() {
+        assert!(friendly("password wrong").contains("not right"));
+        assert!(friendly("locked for 15 minutes").contains("15 minutes"));
+        assert!(friendly("needs administrator").contains("Run as administrator"));
+        assert!(friendly("cannot check password: x").starts_with("Lifeboat could not check"));
+        assert_eq!(friendly("other"), "other");
     }
 
     #[tokio::test(flavor = "multi_thread")]
