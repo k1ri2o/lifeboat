@@ -145,6 +145,9 @@ pub fn run_cycle(env: &dyn Env, cfg: &mut Config, paths: &Paths) -> Outcome {
 
     let snapshot = match env.backup() {
         Ok(s) => s,
+        Err(e) if lifeboat_engine::is_disk_full(&e) => {
+            return Outcome::Error(lifeboat_engine::DISK_FULL_MESSAGE.into())
+        }
         Err(e) => return Outcome::Error(e),
     };
     // Only clean runs teach the baseline.

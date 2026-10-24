@@ -536,14 +536,12 @@ fn full_disk_is_an_error_and_never_forgets_or_prunes() {
 }
 
 #[test]
-#[ignore = "bug: no 'disk full' mapping exists in the engine or service; a full backup disk \
-            surfaces only as raw restic stderr, so the UI cannot tell the user to free space"]
 fn full_disk_reports_a_clear_disk_full_error() {
     let mut w = world(10);
     let mut env = SimEnv::new(&w.cfg, &w.paths, None);
     env.backup_error = Some(DISK_FULL.into());
     match run_cycle(&env, &mut w.cfg, &w.paths) {
-        Outcome::Error(e) => assert!(e.to_lowercase().contains("disk full"), "{e}"),
+        Outcome::Error(e) => assert!(e.contains("The backup disk is full."), "{e}"),
         o => panic!("{o:?}"),
     }
 }
