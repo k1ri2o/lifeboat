@@ -93,3 +93,42 @@ export function keyGroups(key: string, groups = 6): string[] {
   }
   return out;
 }
+
+/** The scheduled backup runs about once an hour. */
+export const BACKUP_INTERVAL_MIN = 60;
+
+/** "Next: in about 50 minutes". */
+export function nextBackupLine(lastRunSecs: number | null | undefined, now: Date = new Date()): string {
+  if (lastRunSecs == null) return "Next: as soon as you press Back up now";
+  const dueMin = Math.round((lastRunSecs * 1000 + BACKUP_INTERVAL_MIN * 60000 - now.getTime()) / 60000);
+  if (dueMin <= 1) return "Next: very soon";
+  if (dueMin < 60) return `Next: in about ${dueMin} minutes`;
+  const h = Math.round(dueMin / 60);
+  return `Next: in about ${h} ${h === 1 ? "hour" : "hours"}`;
+}
+
+/** A folder's last part ("Documents") and where it lives, for a friendly list. */
+export function folderParts(path: string): { name: string; where: string } {
+  const clean = path.replace(/[\\/]+$/, "");
+  const i = Math.max(clean.lastIndexOf("\\"), clean.lastIndexOf("/"));
+  if (i < 0) return { name: clean || path, where: "" };
+  const name = clean.slice(i + 1) || clean;
+  const where = clean.slice(0, i);
+  return { name, where: /^[A-Za-z]:$/.test(where) ? where + "\\" : where };
+}
+
+/** A last backup older than a day means something is probably wrong. */
+export function isStale(lastRunSecs: number | null | undefined, now: Date = new Date()): boolean {
+  if (lastRunSecs == null) return false;
+  return now.getTime() - lastRunSecs * 1000 > 24 * 3600 * 1000;
+}
+
+/** Same as snapshotLabel but for use inside a sentence: "today at 3 PM", "on Tuesday at 3 PM". */
+export function inlineTimeLabel(iso: string, now: Date = new Date()): string {
+  const label = snapshotLabel(iso, now);
+  const m = /^(Today|Yesterday) (.+)$/.exec(label);
+  if (m) return `${m[1].toLowerCase()} at ${m[2]}`;
+  const d = /^([A-Z][a-z]+day) (.+)$/.exec(label);
+  if (d) return `on ${d[1]} at ${d[2]}`;
+  return label === "Unknown time" ? "an unknown time" : `on ${label}`;
+}
