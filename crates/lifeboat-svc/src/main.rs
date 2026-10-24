@@ -4,6 +4,8 @@ mod cycle;
 mod dpapi;
 mod scheduler;
 mod security;
+#[cfg(test)]
+mod sim_tests;
 mod server;
 mod store;
 
