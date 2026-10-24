@@ -19,6 +19,10 @@ pub enum Error {
         code: Option<i32>,
         stderr: String,
     },
+    /// The backup disk has no space left; old backups are untouched.
+    DiskFull {
+        stderr: String,
+    },
     /// restic output could not be parsed.
     Parse(String),
     /// Restore target refused by the safety guard.
@@ -30,6 +34,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Restic { code, stderr } => write!(f, "restic failed ({code:?}): {stderr}"),
+            Error::DiskFull { .. } => f.write_str(DISK_FULL_MESSAGE),
             Error::Parse(m) => write!(f, "cannot parse restic output: {m}"),
             Error::UnsafeTarget(m) => write!(f, "unsafe restore target: {m}"),
         }
@@ -37,6 +42,21 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Plain message shown to the user when the backup disk is full.
+pub const DISK_FULL_MESSAGE: &str =
+    "The backup disk is full. Old backups are kept. Free space or use a bigger disk.";
+
+/// True when restic output says the target ran out of space (Unix ENOSPC, Windows error 112).
+pub fn is_disk_full(stderr: &str) -> bool {
+    let l = stderr.to_lowercase();
+    l.contains("no space left on device")
+        || l.contains("there is not enough space on the disk")
+        || l.contains("enospc")
+        || l.contains("os error 112")
+        || l.contains("error 112")
+        || l.contains("errno 112")
+}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
@@ -267,9 +287,13 @@ impl Engine {
         if out.status.success() {
             Ok(out)
         } else {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if is_disk_full(&stderr) {
+                return Err(Error::DiskFull { stderr });
+            }
             Err(Error::Restic {
                 code: out.status.code(),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                stderr,
             })
         }
     }
@@ -405,6 +429,21 @@ mod tests {
         let s = parse_snapshots(j).unwrap();
         assert_eq!(s[0].tags, ["pre-alert"]);
         assert!(s[1].tags.is_empty());
+    }
+
+    #[test]
+    fn disk_full_stderr_is_recognised() {
+        for s in [
+            "Fatal: unable to save snapshot: write x: no space left on device",
+            "write R: repo data: There is not enough space on the disk.",
+            "write: ENOSPC",
+            "WriteFile: Windows error 112",
+        ] {
+            assert!(is_disk_full(s), "{s}");
+        }
+        assert!(!is_disk_full("Fatal: wrong password or no key found"));
+        let e = Error::DiskFull { stderr: "x".into() };
+        assert_eq!(e.to_string(), DISK_FULL_MESSAGE);
     }
 
     #[test]
