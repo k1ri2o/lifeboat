@@ -360,10 +360,15 @@ fn set_folders(
     if let Err(e) = cycle::plant_canaries(&added, &st.paths.canaries) {
         return err(e);
     }
-    match st.update(|c| c.folders = new) {
-        Ok(()) => Response::Done,
-        Err(e) => err(e),
+    if let Err(e) = st.update(|c| c.folders = new) {
+        return err(e);
     }
+    if removes {
+        if let Err(e) = cycle::forget_file_count(&st.paths.baseline) {
+            return err(format!("folders saved, baseline not reset: {e}"));
+        }
+    }
+    Response::Done
 }
 
 /// Compute the reply for one request line. `limiter` counts wrong passwords; `is_admin` tells

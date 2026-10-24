@@ -169,10 +169,11 @@ fn diff(before: &Snapshot, after: &Snapshot, manifest: &CanaryManifest, secs: u6
 }
 
 /// A trained baseline for a folder where ~3 files change per run.
+// file_count 0: these scenarios judge change rates, not the folder size.
 fn trained() -> Baseline {
     let mut b = Baseline::new();
     for _ in 0..5 {
-        b.update(3, 100);
+        b.update(3, 0);
     }
     b
 }
@@ -342,7 +343,7 @@ fn c_mass_delete_freezes_on_a_busy_folder_baseline() {
     let s = setup(100);
     let mut busy = Baseline::new();
     for _ in 0..10 {
-        busy.update(60, 100);
+        busy.update(60, 0);
     }
     for p in s.real_files().iter().take(90) {
         fs::remove_file(p).unwrap();

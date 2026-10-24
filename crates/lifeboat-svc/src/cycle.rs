@@ -96,6 +96,17 @@ fn save_baseline(path: &Path, b: &Baseline) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Forget the saved file count after the user removes a watched folder, so the smaller
+/// folder set is not mistaken for a mass delete. The next clean run learns the new count.
+pub fn forget_file_count(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut b = load_baseline(path);
+    b.file_count = 0;
+    save_baseline(path, &b)
+}
+
 /// Number of files that count as "changed" for the baseline (created files never do).
 fn changed_count(cs: &ChangeSet) -> usize {
     cs.changes
@@ -574,6 +585,21 @@ mod tests {
         // The next cycle is skipped.
         let env2 = Fake::default();
         assert_eq!(run_cycle(&env2, &mut cfg, &p), Outcome::SkippedFrozen);
+    }
+
+    #[test]
+    fn forget_file_count_keeps_the_rest_of_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("baseline.json");
+        forget_file_count(&p).unwrap();
+        assert!(!p.exists());
+        let mut b = Baseline::default();
+        b.update(4, 500);
+        save_baseline(&p, &b).unwrap();
+        forget_file_count(&p).unwrap();
+        let after = load_baseline(&p);
+        assert_eq!(after.file_count, 0);
+        assert_eq!(after.runs, b.runs);
     }
 
     #[test]

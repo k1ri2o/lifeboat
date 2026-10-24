@@ -395,12 +395,17 @@ fn recovery_key_opens_the_repo_and_a_wrong_key_does_not() {
 // ---- mass delete through the real scan --------------------------------------------------------
 
 #[test]
-#[ignore = "bug: scan_folders is mtime based and cannot see deleted files, so deleting 90% of a \
-            folder (without touching a canary) is not detected and the next cycle backs up the \
-            emptied folder; retention may later drop the good snapshots"]
 fn mass_delete_90_percent_freezes_through_the_service_scan() {
     let mut w = world(100);
     w.cfg.last_run = now() - 600;
+    // A previous clean run saw the whole folder.
+    let before = scan_folders(&[w.src.clone()], 0, &[]).total_files;
+    let b = lifeboat_detect::Baseline {
+        ewma_changed: 2.0,
+        runs: 5,
+        file_count: before,
+    };
+    fs::write(&w.paths.baseline, serde_json::to_vec(&b).unwrap()).unwrap();
     let files = user_files(&w.src);
     for p in files.iter().take(90) {
         fs::remove_file(p).unwrap();
@@ -410,6 +415,11 @@ fn mass_delete_90_percent_freezes_through_the_service_scan() {
     env.backup_error = Some("would have backed up".into());
     let out = run_cycle(&env, &mut w.cfg, &w.paths);
     assert!(matches!(out, Outcome::Attack { .. }), "{out:?}");
+    assert!(!env.called("backup"));
+    // The baseline is not taught by an attack run.
+    let saved: lifeboat_detect::Baseline =
+        serde_json::from_slice(&fs::read(&w.paths.baseline).unwrap()).unwrap();
+    assert_eq!(saved.file_count, before);
 }
 
 #[test]
