@@ -4,7 +4,9 @@
 use crate::guard::{check, Op};
 use crate::ps::{self, quote};
 use crate::{Error, Result};
-use lifeboat_core::disk::{DiskInfo, PartitionInfo, LIFEBOAT_TYPE_GUID};
+use lifeboat_core::disk::{
+    lifeboat_attributes, same_guid, DiskInfo, PartitionInfo, BASIC_DATA_TYPE_GUID, MARKER_FILE,
+};
 use serde::Deserialize;
 
 const LIST_SCRIPT: &str = "$r = @(Get-Disk | ForEach-Object { $d = $_; \
@@ -12,7 +14,8 @@ const LIST_SCRIPT: &str = "$r = @(Get-Disk | ForEach-Object { $d = $_; \
 BusType=[string]$d.BusType; IsBoot=[bool]$d.IsBoot; IsSystem=[bool]$d.IsSystem; \
 Partitions=@(Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue | ForEach-Object { \
 [pscustomobject]@{ Number=[int]$_.PartitionNumber; Offset=[uint64]$_.Offset; Size=[uint64]$_.Size; \
-GptType=[string]$_.GptType; DriveLetter=[string]$_.DriveLetter } }) } }); \
+GptType=[string]$_.GptType; DriveLetter=[string]$_.DriveLetter; \
+IsHidden=[bool]$_.IsHidden; Guid=[string]$_.Guid } }) } }); \
 ConvertTo-Json -Depth 4 -InputObject $r";
 
 #[derive(Deserialize)]
@@ -45,6 +48,10 @@ struct RawPart {
     gpt_type: String,
     #[serde(default)]
     drive_letter: String,
+    #[serde(default)]
+    is_hidden: bool,
+    #[serde(default)]
+    guid: String,
 }
 
 /// Parse the JSON printed by [`LIST_SCRIPT`] (an array, or a lone object on old PowerShell).
@@ -75,6 +82,8 @@ pub fn parse_disks(json: &str) -> Result<Vec<DiskInfo>> {
                     size: p.size,
                     gpt_type: p.gpt_type,
                     drive_letter: p.drive_letter.chars().find(|c| c.is_ascii_alphabetic()),
+                    is_hidden: p.is_hidden,
+                    guid: p.guid,
                 })
                 .collect(),
         })
@@ -93,8 +102,20 @@ pub(crate) fn disk_by_number(n: u32) -> Result<DiskInfo> {
         .ok_or_else(|| Error::NotFound(format!("disk {n}")))
 }
 
-/// PowerShell that creates the hidden partition (`size` bytes, or the largest free extent),
-/// formats it NTFS and hides it. Pure text builder; unit-tested.
+/// A freshly created Lifeboat partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedVolume {
+    /// Volume GUID path (`\\?\Volume{...}\`).
+    pub volume_path: String,
+    /// Unique partition GUID, to be saved in the config.
+    pub partition_guid: String,
+}
+
+/// PowerShell that creates the hidden partition (`size` bytes, or the largest free extent) with
+/// the basic data type (Windows will not mount a custom type), formats it NTFS, writes the marker
+/// file `lifeboat.id` (holding the partition GUID) and hides it. `-IsHidden` and
+/// `-NoDefaultDriveLetter` set GPT attribute bits 62 and 63 (0xC000000000000000); the script
+/// checks they stuck. The last line it prints is the partition GUID. Pure text builder.
 pub fn create_partition_script(disk: u32, size: Option<u64>) -> String {
     let extent = match size {
         Some(s) => format!("-Size {s}"),
@@ -103,47 +124,113 @@ pub fn create_partition_script(disk: u32, size: Option<u64>) -> String {
     format!(
         "$p = New-Partition -DiskNumber {disk} {extent} -GptType {guid}; \
          $p | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Lifeboat' -Confirm:$false | Out-Null; \
+         $p = Get-Partition -DiskNumber {disk} -PartitionNumber $p.PartitionNumber; \
+         $g = [string]$p.Guid; \
+         $v = $p.AccessPaths | Where-Object {{ $_ -like '\\\\?\\Volume{{*' }} | Select-Object -First 1; \
+         [System.IO.File]::WriteAllText($v + {marker}, $g); \
          Set-Partition -DiskNumber {disk} -PartitionNumber $p.PartitionNumber \
-         -IsHidden $true -NoDefaultDriveLetter $true",
-        guid = quote(LIFEBOAT_TYPE_GUID)
+         -IsHidden $true -NoDefaultDriveLetter $true; \
+         if (-not (Get-Partition -DiskNumber {disk} -PartitionNumber $p.PartitionNumber).IsHidden) \
+         {{ throw 'partition did not become hidden (attributes 0x{attrs:X})' }}; \
+         Write-Output $g",
+        guid = quote(BASIC_DATA_TYPE_GUID),
+        marker = quote(MARKER_FILE),
+        attrs = lifeboat_attributes(),
     )
 }
 
-/// Initialise an empty external disk as GPT, create the hidden NTFS partition filling it and
-/// return its volume GUID path. Refuses boot/system disks and non-empty disks.
-pub fn prepare_external(disk_number: u32) -> Result<String> {
-    let disk = disk_by_number(disk_number)?;
-    check(&disk, Op::PrepareExternal, false)?;
-    let init = if disk.partitions.is_empty() {
-        // A disk that has been used before may still be GPT/MBR without partitions.
-        format!(
-            "if ((Get-Disk -Number {n}).PartitionStyle -eq 'RAW') {{ Initialize-Disk -Number {n} -PartitionStyle GPT }} \
-             elseif ((Get-Disk -Number {n}).PartitionStyle -ne 'GPT') {{ throw 'disk is MBR; refusing to convert' }}; ",
-            n = disk_number
-        )
-    } else {
-        String::new()
-    };
-    ps::run(&format!(
-        "{init}{}",
-        create_partition_script(disk_number, None)
-    ))?;
-    find_lifeboat_volume()?.ok_or_else(|| Error::NotFound("new Lifeboat volume".into()))
+/// Take the partition GUID from the last non-empty line of [`create_partition_script`]'s output.
+pub fn parse_created_guid(out: &str) -> Result<String> {
+    match out.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+        Some(l) if is_guid(l) => Ok(l.to_string()),
+        _ => Err(Error::Parse(format!(
+            "no partition GUID in output: {out:?}"
+        ))),
+    }
 }
 
-/// Find the Lifeboat partition by type GUID and return its volume GUID path
-/// (`\\?\Volume{...}\`), or `None` when there is none (or it has no mounted volume, e.g. the
-/// disk is offline).
-pub fn find_lifeboat_volume() -> Result<Option<String>> {
-    let out = ps::run(&format!(
-        "Get-Partition | Where-Object {{ $_.GptType -eq {} }} | ForEach-Object {{ $_.AccessPaths }}",
-        quote(LIFEBOAT_TYPE_GUID)
-    ))?;
-    Ok(out
-        .lines()
+fn is_guid(s: &str) -> bool {
+    let t = s.trim_matches(|c| c == '{' || c == '}');
+    let parts: Vec<&str> = t.split('-').collect();
+    parts.len() == 5
+        && [8, 4, 4, 4, 12]
+            .iter()
+            .zip(&parts)
+            .all(|(n, p)| p.len() == *n && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Run the creation script and resolve the new partition's volume.
+pub(crate) fn create_and_find(disk: u32, size: Option<u64>) -> Result<PreparedVolume> {
+    let out = ps::run(&create_partition_script(disk, size))?;
+    let guid = parse_created_guid(&out)?;
+    let volume_path = find_lifeboat_volume(&guid)?
+        .ok_or_else(|| Error::NotFound("new Lifeboat volume".into()))?;
+    Ok(PreparedVolume {
+        volume_path,
+        partition_guid: guid,
+    })
+}
+
+/// Initialise an empty external disk as GPT, create the hidden NTFS partition filling it and
+/// return its volume GUID path and partition GUID. Refuses boot/system disks and non-empty disks.
+pub fn prepare_external(disk_number: u32) -> Result<PreparedVolume> {
+    let disk = disk_by_number(disk_number)?;
+    check(&disk, Op::PrepareExternal, false)?;
+    if disk.partitions.is_empty() {
+        // A disk that has been used before may still be GPT/MBR without partitions.
+        ps::run(&format!(
+            "if ((Get-Disk -Number {n}).PartitionStyle -eq 'RAW') {{ Initialize-Disk -Number {n} -PartitionStyle GPT }} \
+             elseif ((Get-Disk -Number {n}).PartitionStyle -ne 'GPT') {{ throw 'disk is MBR; refusing to convert' }}",
+            n = disk_number
+        ))?;
+    }
+    create_and_find(disk_number, None)
+}
+
+/// PowerShell that lists the access paths of the partition with unique GUID `partition_guid`.
+pub fn find_script(partition_guid: &str) -> String {
+    format!(
+        "Get-Partition | Where-Object {{ $_.Guid -eq {} }} | ForEach-Object {{ $_.AccessPaths }}",
+        quote(&braced(partition_guid))
+    )
+}
+
+fn braced(guid: &str) -> String {
+    format!(
+        "{{{}}}",
+        guid.trim()
+            .trim_matches(|c| c == '{' || c == '}')
+            .to_ascii_lowercase()
+    )
+}
+
+/// First `\\?\Volume{...}` path in the script output.
+pub fn parse_volume_path(out: &str) -> Option<String> {
+    out.lines()
         .map(str::trim)
         .find(|l| l.to_ascii_lowercase().starts_with(r"\\?\volume{"))
-        .map(str::to_string))
+        .map(str::to_string)
+}
+
+/// Does the marker file's content name `partition_guid`?
+pub fn marker_matches(contents: &str, partition_guid: &str) -> bool {
+    same_guid(contents, partition_guid)
+}
+
+/// Find the Lifeboat partition by its unique partition GUID, confirm it with the marker file
+/// `lifeboat.id` at the volume root, and return its volume GUID path (`\\?\Volume{...}\`).
+/// `None` when there is no such partition, it has no mounted volume (e.g. the disk is offline)
+/// or the marker does not match.
+pub fn find_lifeboat_volume(partition_guid: &str) -> Result<Option<String>> {
+    if partition_guid.trim().is_empty() {
+        return Ok(None);
+    }
+    let out = ps::run(&find_script(partition_guid))?;
+    let Some(vol) = parse_volume_path(&out) else {
+        return Ok(None);
+    };
+    let marker = std::fs::read_to_string(format!("{vol}{MARKER_FILE}")).unwrap_or_default();
+    Ok(marker_matches(&marker, partition_guid).then_some(vol))
 }
 
 fn set_offline(disk_number: u32, offline: bool) -> Result<()> {
@@ -198,10 +285,54 @@ mod tests {
     fn create_script_text() {
         let s = create_partition_script(7, None);
         assert!(s.contains(
-            "-DiskNumber 7 -UseMaximumSize -GptType '{6c1f3a52-8d4e-4b7a-9e21-5f0b8a7d3c14}'"
+            "-DiskNumber 7 -UseMaximumSize -GptType '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}'"
         ));
+        assert!(!s.contains("6c1f3a52"), "old custom type must be gone");
         assert!(s.contains("-IsHidden $true -NoDefaultDriveLetter $true"));
+        assert!(s.contains("0xC000000000000000"), "{s}");
+        assert!(s.contains("'lifeboat.id'"));
         assert!(s.contains("Format-Volume -FileSystem NTFS"));
         assert!(create_partition_script(7, Some(123)).contains("-Size 123 "));
+    }
+
+    #[test]
+    fn created_guid_parsed() {
+        let g = "{3f2a9c10-1b2c-4d3e-8f90-0123456789ab}";
+        assert_eq!(parse_created_guid(&format!("noise\r\n{g}\r\n")).unwrap(), g);
+        assert!(parse_created_guid("").is_err());
+        assert!(parse_created_guid("not a guid").is_err());
+    }
+
+    #[test]
+    fn find_by_partition_guid() {
+        let s = find_script("3F2A9C10-1B2C-4D3E-8F90-0123456789AB");
+        assert!(
+            s.contains("$_.Guid -eq '{3f2a9c10-1b2c-4d3e-8f90-0123456789ab}'"),
+            "{s}"
+        );
+        assert!(!s.contains("GptType"));
+        let out = "E:\\\r\n\\\\?\\Volume{aaaa}\\\r\n";
+        assert_eq!(
+            parse_volume_path(out).as_deref(),
+            Some(r"\\?\Volume{aaaa}\")
+        );
+        assert_eq!(parse_volume_path(""), None);
+        assert_eq!(find_lifeboat_volume("  ").unwrap(), None);
+    }
+
+    #[test]
+    fn marker_check() {
+        assert!(marker_matches("{ABC-1}\n", "abc-1"));
+        assert!(!marker_matches("{abc-2}", "{abc-1}"));
+        assert!(!marker_matches("", ""));
+    }
+
+    #[test]
+    fn list_carries_guid_and_hidden() {
+        let j = r#"[{"Number":1,"Partitions":[{"Number":1,"GptType":"{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}","IsHidden":true,"Guid":"{g1}","DriveLetter":""}]}]"#;
+        let d = parse_disks(j).unwrap();
+        assert!(d[0].partitions[0].is_hidden);
+        assert_eq!(d[0].partitions[0].guid, "{g1}");
+        assert!(d[0].partitions[0].is_lifeboat());
     }
 }

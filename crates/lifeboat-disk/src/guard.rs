@@ -82,7 +82,7 @@ pub fn check(disk: &DiskInfo, op: Op, reuse: bool) -> Result<(), GuardError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lifeboat_core::disk::{PartitionInfo, LIFEBOAT_TYPE_GUID};
+    use lifeboat_core::disk::{PartitionInfo, BASIC_DATA_TYPE_GUID};
 
     fn disk(boot: bool, system: bool, parts: Vec<PartitionInfo>) -> DiskInfo {
         DiskInfo {
@@ -103,6 +103,17 @@ mod tests {
             size: 1,
             gpt_type: guid.into(),
             drive_letter: None,
+            is_hidden: true,
+            guid: "{g}".into(),
+        }
+    }
+
+    /// An ordinary visible data partition (same basic data type, but with a drive letter).
+    fn user_part() -> PartitionInfo {
+        PartitionInfo {
+            drive_letter: Some('E'),
+            is_hidden: false,
+            ..part(BASIC_DATA_TYPE_GUID)
         }
     }
 
@@ -134,24 +145,20 @@ mod tests {
 
     #[test]
     fn existing_lifeboat_needs_reuse() {
-        let d = disk(false, false, vec![part(LIFEBOAT_TYPE_GUID)]);
+        let d = disk(false, false, vec![part(BASIC_DATA_TYPE_GUID)]);
         assert_eq!(
             check(&d, Op::PrepareExternal, false),
             Err(GuardError::AlreadyHasLifeboat(3))
         );
         assert_eq!(check(&d, Op::PrepareExternal, true), Ok(()));
-        let sys = disk(true, true, vec![part(LIFEBOAT_TYPE_GUID)]);
+        let sys = disk(true, true, vec![part(BASIC_DATA_TYPE_GUID)]);
         assert!(check(&sys, Op::InternalShrink, false).is_err());
         assert_eq!(check(&sys, Op::InternalShrink, true), Ok(()));
     }
 
     #[test]
     fn non_empty_external_refused() {
-        let d = disk(
-            false,
-            false,
-            vec![part("{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}")],
-        );
+        let d = disk(false, false, vec![user_part()]);
         assert_eq!(
             check(&d, Op::PrepareExternal, true),
             Err(GuardError::DiskNotEmpty(3))

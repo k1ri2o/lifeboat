@@ -17,15 +17,19 @@ pub enum Request {
     Backup,
     ListSnapshots,
     /// Restore a snapshot (or only `path` from it) into the new folder `target`.
+    /// Dangerous: needs the repository `password`.
     Restore {
+        password: String,
         snapshot: String,
         target: String,
         path: Option<String>,
     },
     /// List the disks the machine has.
     ListDisks,
-    /// Create the hidden Lifeboat partition on `disk`.
+    /// Create the hidden Lifeboat partition on `disk`. Dangerous: needs the repository
+    /// `password` and an elevated administrator on the other end of the pipe.
     PrepareDisk {
+        password: String,
         disk: u32,
         mode: PrepareMode,
     },
@@ -64,6 +68,8 @@ pub enum Response {
     Prepared {
         /// Volume GUID path of the new partition (a "Volume{...}" path under the device namespace).
         volume_path: String,
+        /// Unique partition GUID; the UI/service saves it as `Config::partition_guid`.
+        partition_guid: String,
     },
     Error {
         message: String,
@@ -114,6 +120,7 @@ mod tests {
     #[test]
     fn restore_roundtrip() {
         let r = Request::Restore {
+            password: "pw".into(),
             snapshot: "abc".into(),
             target: "D:/out".into(),
             path: None,
