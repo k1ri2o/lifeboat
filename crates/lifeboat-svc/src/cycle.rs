@@ -795,7 +795,11 @@ mod fresh_install_tests {
         let d = tempfile::tempdir().unwrap();
         let folder = d.path().join("docs");
         std::fs::create_dir(&folder).unwrap();
-        let manifest = d.path().join("ProgramData").join("Lifeboat").join("canaries.json");
+        let manifest = d
+            .path()
+            .join("ProgramData")
+            .join("Lifeboat")
+            .join("canaries.json");
         plant_canaries(&[folder], &manifest).unwrap();
         assert_eq!(load_canaries(&manifest).len(), 1);
     }
