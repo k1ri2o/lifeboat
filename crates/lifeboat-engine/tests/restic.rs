@@ -62,3 +62,34 @@ fn backup_list_restore_roundtrip() {
     // A second restore into the now non-empty folder is refused.
     assert!(e.restore(&id, &out, None).is_err());
 }
+
+#[test]
+fn tag_key_retention_check_with_real_restic() {
+    let Some(restic) = restic() else {
+        eprintln!("SKIPPED: vendor/restic/restic.exe missing; run scripts/fetch-restic.ps1");
+        return;
+    };
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("a.txt"), b"one").unwrap();
+    let e = Engine::new(
+        restic.clone(),
+        t.path().join("repo"),
+        "pw",
+        vec![src.clone()],
+    );
+    e.init().unwrap();
+    let id = e.backup().unwrap();
+    e.tag_add(&id, "pre-alert").unwrap();
+    let snaps = e.snapshots().unwrap();
+    assert!(snaps[0].tags.iter().any(|t| t == "pre-alert"));
+    e.add_key("recovery-key").unwrap();
+    let rec = Engine::new(restic, t.path().join("repo"), "recovery-key", vec![]);
+    assert!(rec.verify_password("recovery-key").unwrap());
+    e.apply_retention().unwrap();
+    assert_eq!(e.snapshots().unwrap().len(), 1, "pre-alert snapshot kept");
+    e.check_subset().unwrap();
+    e.forget_snapshots(&[id]).unwrap();
+    assert!(e.snapshots().unwrap().is_empty());
+}
