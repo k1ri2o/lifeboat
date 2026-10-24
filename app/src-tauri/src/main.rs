@@ -1,23 +1,261 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use lifeboat_core::ipc::{client, Request, Response};
+mod folders;
+mod pipe;
+mod target;
 
-/// Ask the service for its status and return a one-line description.
+use lifeboat_core::disk::{DiskInfo, PrepareMode};
+use lifeboat_core::ipc::{SnapshotInfo, PIPE_NAME};
+use pipe::{ApiError, StatusInfo};
+use serde::Serialize;
+use std::path::PathBuf;
+use std::time::Duration;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
+
+/// How often the app asks the service whether backups got frozen.
+const POLL_EVERY: Duration = Duration::from_secs(30);
+
+/// Run a blocking pipe call off the UI thread.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError::other(e.to_string()))?
+}
+
+fn folders_file(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("folders.json"))
+        .map_err(|e| e.to_string())
+}
+
+fn notify(app: &AppHandle, title: &str, body: &str) {
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// Should the "backups paused" notification fire? Once per freeze, including a freeze already
+/// present when the app starts.
+fn should_notify_frozen(previous: Option<bool>, now: bool) -> bool {
+    now && previous != Some(true)
+}
+
+#[derive(Serialize)]
+struct HomeState {
+    status: StatusInfo,
+    /// Time of the newest snapshot, if there is one.
+    last_backup: Option<String>,
+    folders: Vec<String>,
+}
+
 #[tauri::command]
-fn service_status() -> Result<String, String> {
-    match client::request(&Request::Status).map_err(|e| e.to_string())? {
-        Response::Status { version, frozen } => Ok(format!(
-            "Service running (v{version}){}",
-            if frozen { ", backups frozen" } else { "" }
-        )),
-        Response::Error { message } => Err(message),
-        other => Err(format!("unexpected reply: {other:?}")),
+async fn home_state(app: AppHandle) -> Result<HomeState, ApiError> {
+    let file = folders_file(&app).map_err(ApiError::other)?;
+    blocking(move || {
+        let status = pipe::status(PIPE_NAME)?;
+        // No snapshots (or no repository yet) simply means "never backed up".
+        let last_backup = pipe::snapshots(PIPE_NAME)
+            .ok()
+            .and_then(|v| v.into_iter().map(|s| s.time).max());
+        Ok(HomeState {
+            status,
+            last_backup,
+            folders: folders::load(&file),
+        })
+    })
+    .await
+}
+
+/// Back up now, then tell the user. Used by the button and the tray.
+async fn run_backup(app: AppHandle) -> Result<(), ApiError> {
+    let r = blocking(|| pipe::backup(PIPE_NAME)).await;
+    match &r {
+        Ok(_) => {
+            notify(&app, "Backup finished", "Your files are safe.");
+            let _ = app.emit("backup-done", ());
+        }
+        Err(e) => notify(&app, "Backup did not work", &e.message),
     }
+    r.map(|_| ())
+}
+
+#[tauri::command]
+async fn backup_now(app: AppHandle) -> Result<(), ApiError> {
+    run_backup(app).await
+}
+
+#[tauri::command]
+async fn list_snapshots() -> Result<Vec<SnapshotInfo>, ApiError> {
+    blocking(|| pipe::snapshots(PIPE_NAME)).await
+}
+
+#[tauri::command]
+async fn restore(snapshot: String, target: String, password: String) -> Result<(), ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other("Please type your Lifeboat password."));
+    }
+    target::check_restore_target(&target).map_err(ApiError::other)?;
+    blocking(move || pipe::restore(PIPE_NAME, &snapshot, &target, &password)).await
+}
+
+#[tauri::command]
+async fn list_disks() -> Result<Vec<DiskInfo>, ApiError> {
+    blocking(|| pipe::disks(PIPE_NAME)).await
+}
+
+/// `internal_drive_letter` and `internal_size_gb` are set only for an internal disk.
+#[tauri::command]
+async fn prepare_disk(
+    disk: u32,
+    internal_drive_letter: Option<String>,
+    internal_size_gb: Option<u64>,
+    password: String,
+) -> Result<String, ApiError> {
+    if password.len() < 8 {
+        return Err(ApiError::other(
+            "Please choose a password with at least 8 characters.",
+        ));
+    }
+    let mode = match (internal_drive_letter, internal_size_gb) {
+        (None, None) => PrepareMode::External,
+        (Some(l), Some(gb)) if gb > 0 => PrepareMode::InternalShrink {
+            drive_letter: l
+                .chars()
+                .next()
+                .ok_or_else(|| ApiError::other("Missing drive letter."))?
+                .to_ascii_uppercase(),
+            size_bytes: gb.saturating_mul(1024 * 1024 * 1024),
+        },
+        _ => return Err(ApiError::other("Please say how much space to set aside.")),
+    };
+    blocking(move || pipe::prepare(PIPE_NAME, disk, mode, &password)).await
+}
+
+#[tauri::command]
+fn add_folder(app: AppHandle, folder: String) -> Result<Vec<String>, String> {
+    folders::add(&folders_file(&app)?, &folder)
+}
+
+#[tauri::command]
+fn remove_folder(app: AppHandle, folder: String) -> Result<Vec<String>, String> {
+    folders::remove(&folders_file(&app)?, &folder)
+}
+
+fn show_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open Lifeboat", true, None::<&str>)?;
+    let backup = MenuItem::with_id(app, "backup", "Back up now", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &backup, &quit])?;
+    let mut builder = TrayIconBuilder::new()
+        .tooltip("Lifeboat")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_window(app),
+            "backup" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = run_backup(app).await;
+                });
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
+/// Ask the service for its status every 30 seconds; notify when backups get frozen.
+fn spawn_poller(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut previous: Option<bool> = None;
+        loop {
+            match pipe::status(PIPE_NAME) {
+                Ok(s) => {
+                    if should_notify_frozen(previous, s.frozen) {
+                        notify(
+                            &app,
+                            "Lifeboat paused your backups",
+                            "Possible ransomware detected. Open Lifeboat to see what to do.",
+                        );
+                    }
+                    previous = Some(s.frozen);
+                    let _ = app.emit("status-changed", s);
+                }
+                Err(_) => {
+                    let _ = app.emit("service-down", ());
+                }
+            }
+            std::thread::sleep(POLL_EVERY);
+        }
+    });
 }
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![service_status])
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            setup_tray(app.handle())?;
+            spawn_poller(app.handle().clone());
+            Ok(())
+        })
+        // Closing the window keeps Lifeboat running in the tray.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            home_state,
+            backup_now,
+            list_snapshots,
+            restore,
+            list_disks,
+            prepare_disk,
+            add_folder,
+            remove_folder
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Lifeboat");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_notify_frozen;
+
+    #[test]
+    fn frozen_notification_fires_once_per_freeze() {
+        assert!(should_notify_frozen(None, true));
+        assert!(should_notify_frozen(Some(false), true));
+        assert!(!should_notify_frozen(Some(true), true));
+        assert!(!should_notify_frozen(Some(false), false));
+        assert!(!should_notify_frozen(None, false));
+    }
 }

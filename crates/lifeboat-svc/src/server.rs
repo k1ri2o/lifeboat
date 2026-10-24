@@ -130,6 +130,7 @@ pub fn handle_line(
         Ok(Request::Status) => Response::Status {
             version: env!("CARGO_PKG_VERSION").to_string(),
             frozen: false,
+            frozen_since: None,
         },
         Ok(Request::ListDisks) => match lifeboat_disk::list_disks() {
             Ok(disks) => Response::Disks { disks },

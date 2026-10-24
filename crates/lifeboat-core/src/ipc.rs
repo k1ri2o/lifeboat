@@ -54,6 +54,9 @@ pub enum Response {
         version: String,
         /// Whether backups are currently frozen (always false until M4).
         frozen: bool,
+        /// When the freeze started (RFC 3339), if frozen and known.
+        #[serde(default)]
+        frozen_since: Option<String>,
     },
     BackupDone {
         snapshot: String,
@@ -144,8 +147,23 @@ mod tests {
         let r = Response::Status {
             version: "0.1.0".into(),
             frozen: false,
+            frozen_since: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
+    }
+
+    #[test]
+    fn status_without_frozen_since_still_parses() {
+        let r: Response =
+            serde_json::from_str(r#"{"reply":"Status","version":"1","frozen":true}"#).unwrap();
+        assert!(matches!(
+            r,
+            Response::Status {
+                frozen: true,
+                frozen_since: None,
+                ..
+            }
+        ));
     }
 }

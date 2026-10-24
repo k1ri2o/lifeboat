@@ -8,7 +8,12 @@ license.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 lifeboat-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
