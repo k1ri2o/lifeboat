@@ -34,7 +34,7 @@ pub fn to_hex(b: &[u8]) -> String {
 }
 
 pub fn from_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 || !s.is_ascii() {
+    if !s.len().is_multiple_of(2) || !s.is_ascii() {
         return None;
     }
     (0..s.len() / 2)
@@ -58,6 +58,7 @@ impl Store {
     }
 
     /// Store at a custom path without ACL changes (tests).
+    #[cfg(test)]
     pub fn at(path: PathBuf) -> Self {
         Store {
             path,

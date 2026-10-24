@@ -94,6 +94,7 @@ pub fn status(pipe: &str) -> Result<StatusInfo, ApiError> {
             version,
             frozen,
             frozen_since,
+            ..
         } => Ok(StatusInfo {
             version,
             frozen,
@@ -205,6 +206,12 @@ mod tests {
                 version: "1.2.3".into(),
                 frozen: true,
                 frozen_since: Some("2026-10-24T10:00:00Z".into()),
+                freeze_reasons: vec![],
+                same_physical_disk: false,
+                last_run: None,
+                last_backup: None,
+                last_check: None,
+                pending_deletes: vec![],
             }
         });
         let s = on_thread(move || status(&pipe)).await.unwrap();
