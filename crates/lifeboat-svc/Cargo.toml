@@ -7,9 +7,16 @@ license.workspace = true
 [dependencies]
 lifeboat-core.workspace = true
 lifeboat-engine = { path = "../lifeboat-engine" }
+serde.workspace = true
 serde_json.workspace = true
+lifeboat-detect = { path = "../lifeboat-detect" }
+notify = "6"
+getrandom = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
 windows-service = "0.8"
 lifeboat-disk = { path = "../lifeboat-disk" }
 sha1 = "0.10"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"
