@@ -12,6 +12,24 @@ pub const PIPE_NAME: &str = r"\\.\pipe\lifeboat";
 pub enum Request {
     Ping,
     Status,
+    /// Back up all configured folders now.
+    Backup,
+    ListSnapshots,
+    /// Restore a snapshot (or only `path` from it) into the new folder `target`.
+    Restore {
+        snapshot: String,
+        target: String,
+        path: Option<String>,
+    },
+}
+
+/// A snapshot as shown to the UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotInfo {
+    pub id: String,
+    pub short_id: String,
+    pub time: String,
+    pub paths: Vec<String>,
 }
 
 /// The service's answer.
@@ -25,6 +43,13 @@ pub enum Response {
         /// Whether backups are currently frozen (always false until M4).
         frozen: bool,
     },
+    BackupDone {
+        snapshot: String,
+    },
+    Snapshots {
+        snapshots: Vec<SnapshotInfo>,
+    },
+    Restored,
     Error {
         message: String,
     },
@@ -69,6 +94,27 @@ mod tests {
             serde_json::to_string(&Response::Pong).unwrap(),
             r#"{"reply":"Pong"}"#
         );
+    }
+
+    #[test]
+    fn restore_roundtrip() {
+        let r = Request::Restore {
+            snapshot: "abc".into(),
+            target: "D:/out".into(),
+            path: None,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), r);
+        let r = Response::Snapshots {
+            snapshots: vec![SnapshotInfo {
+                id: "a".into(),
+                short_id: "a".into(),
+                time: "t".into(),
+                paths: vec![],
+            }],
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
     }
 
     #[test]
