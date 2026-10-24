@@ -53,6 +53,9 @@ before the alert.
 - **Service: Rust Windows service** (`lifeboat-svc`), runs as its own account, does the watching,
   scheduling, detection, partition work and backups. Talks to the UI over a local named pipe whose
   commands can't delete anything without password + delay.
+- **Pipe gating:** PrepareDisk and Restore need the backup password (checked by the service against
+  the repo; 5 wrong tries lock it for 15 minutes), and PrepareDisk also needs an elevated admin client
+  (checked by impersonating the pipe client). Backup, status and listing stay open.
 - **Backup engine: restic** (open source, BSD-2, audited design, encrypted, deduplicated snapshots),
   bundled as one exe. We don't write our own crypto.
 - **Watching:** file-change events with a 10-minute quiet period, plus a scheduled hourly run.
