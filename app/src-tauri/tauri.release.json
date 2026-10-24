@@ -1,0 +1,16 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": {
+      "../../target/release/lifeboat-svc.exe": "lifeboat-svc.exe",
+      "../../vendor/restic/restic.exe": "restic.exe",
+      "../../LICENSE": "LICENSE.txt"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
+  }
+}
