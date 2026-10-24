@@ -47,25 +47,16 @@ fn should_notify_frozen(previous: Option<bool>, now: bool) -> bool {
 #[derive(Serialize)]
 struct HomeState {
     status: StatusInfo,
-    /// Time of the newest snapshot, if there is one.
-    last_backup: Option<String>,
     folders: Vec<String>,
 }
 
 #[tauri::command]
-async fn home_state(app: AppHandle) -> Result<HomeState, ApiError> {
-    let file = folders_file(&app).map_err(ApiError::other)?;
-    blocking(move || {
+async fn home_state() -> Result<HomeState, ApiError> {
+    blocking(|| {
         let status = pipe::status(PIPE_NAME)?;
-        // No snapshots (or no repository yet) simply means "never backed up".
-        let last_backup = pipe::snapshots(PIPE_NAME)
-            .ok()
-            .and_then(|v| v.into_iter().map(|s| s.time).max());
-        Ok(HomeState {
-            status,
-            last_backup,
-            folders: folders::load(&file),
-        })
+        // No repository yet simply means no folders yet.
+        let folders = pipe::folders(PIPE_NAME).unwrap_or_default();
+        Ok(HomeState { status, folders })
     })
     .await
 }
@@ -135,14 +126,48 @@ async fn prepare_disk(
     blocking(move || pipe::prepare(PIPE_NAME, disk, mode, &password)).await
 }
 
-#[tauri::command]
-fn add_folder(app: AppHandle, folder: String) -> Result<Vec<String>, String> {
-    folders::add(&folders_file(&app)?, &folder)
+fn same_folder(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 #[tauri::command]
-fn remove_folder(app: AppHandle, folder: String) -> Result<Vec<String>, String> {
-    folders::remove(&folders_file(&app)?, &folder)
+async fn add_folder(folder: String) -> Result<Vec<String>, ApiError> {
+    let folder = folder.trim().to_string();
+    blocking(move || {
+        let mut list = pipe::folders(PIPE_NAME)?;
+        if !folder.is_empty() && !list.iter().any(|f| same_folder(f, &folder)) {
+            list.push(folder);
+            pipe::set_folders(PIPE_NAME, list.clone(), None)?;
+        }
+        Ok(list)
+    })
+    .await
+}
+
+/// Removing a folder needs the Lifeboat password.
+#[tauri::command]
+async fn remove_folder(folder: String, password: String) -> Result<Vec<String>, ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other("Please type your Lifeboat password."));
+    }
+    blocking(move || {
+        let mut list = pipe::folders(PIPE_NAME)?;
+        list.retain(|f| !same_folder(f, &folder));
+        pipe::set_folders(PIPE_NAME, list.clone(), Some(password))?;
+        Ok(list)
+    })
+    .await
+}
+
+/// Second setup step: create the repository. Returns the recovery key, to be shown once.
+#[tauri::command]
+async fn init_repo(password: String, folders: Vec<String>) -> Result<String, ApiError> {
+    if password.len() < 8 {
+        return Err(ApiError::other(
+            "Please choose a password with at least 8 characters.",
+        ));
+    }
+    blocking(move || pipe::init_repo(PIPE_NAME, &password, folders)).await
 }
 
 fn show_window(app: &AppHandle) {
@@ -194,7 +219,18 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 fn spawn_poller(app: AppHandle) {
     std::thread::spawn(move || {
         let mut previous: Option<bool> = None;
+        let mut old_file = folders_file(&app).ok();
         loop {
+            if let Some(file) = &old_file {
+                let r = folders::migrate(
+                    file,
+                    || pipe::folders(PIPE_NAME).ok(),
+                    |l| pipe::set_folders(PIPE_NAME, l, None).is_ok(),
+                );
+                if r != folders::Migration::Retry {
+                    old_file = None;
+                }
+            }
             match pipe::status(PIPE_NAME) {
                 Ok(s) => {
                     if should_notify_frozen(previous, s.frozen) {
@@ -240,7 +276,8 @@ fn main() {
             list_disks,
             prepare_disk,
             add_folder,
-            remove_folder
+            remove_folder,
+            init_repo
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lifeboat");

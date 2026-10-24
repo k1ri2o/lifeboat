@@ -8,10 +8,11 @@ export interface StatusInfo {
   version: string;
   frozen: boolean;
   frozen_since: string | null;
+  /** Unix seconds of the last successful backup. */
+  last_run: number | null;
 }
 export interface HomeState {
   status: StatusInfo;
-  last_backup: string | null;
   folders: string[];
 }
 export interface Snapshot {
@@ -70,5 +71,9 @@ export const api = {
       internalSizeGb: internal?.sizeGb ?? null,
     }),
   addFolder: (folder: string) => call<string[]>("add_folder", { folder }),
-  removeFolder: (folder: string) => call<string[]>("remove_folder", { folder }),
+  /** Removing a folder needs the Lifeboat password. */
+  removeFolder: (folder: string, password: string) =>
+    call<string[]>("remove_folder", { folder, password }),
+  initRepo: (password: string, folders: string[]) =>
+    call<string>("init_repo", { password, folders }),
 };

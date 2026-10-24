@@ -54,6 +54,8 @@ pub struct StatusInfo {
     pub version: String,
     pub frozen: bool,
     pub frozen_since: Option<String>,
+    /// Unix seconds of the last successful backup cycle.
+    pub last_run: Option<u64>,
 }
 
 fn call(pipe: &str, req: &Request) -> Result<Response, ApiError> {
@@ -94,11 +96,13 @@ pub fn status(pipe: &str) -> Result<StatusInfo, ApiError> {
             version,
             frozen,
             frozen_since,
+            last_run,
             ..
         } => Ok(StatusInfo {
             version,
             frozen,
             frozen_since,
+            last_run,
         }),
         r => Err(unexpected(r)),
     }
@@ -156,6 +160,38 @@ pub fn prepare(
     }
 }
 
+/// The folders the service backs up.
+pub fn folders(pipe: &str) -> Result<Vec<String>, ApiError> {
+    match call(pipe, &Request::ListFolders)? {
+        Response::Folders { folders } => Ok(folders),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Replace the folder list. `password` is needed when the change removes a folder.
+pub fn set_folders(
+    pipe: &str,
+    folders: Vec<String>,
+    password: Option<String>,
+) -> Result<(), ApiError> {
+    match call(pipe, &Request::SetFolders { folders, password })? {
+        Response::Done => Ok(()),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// First setup: create the repository. Returns the recovery key (shown once, never stored).
+pub fn init_repo(pipe: &str, password: &str, folders: Vec<String>) -> Result<String, ApiError> {
+    let req = Request::InitRepo {
+        password: password.to_string(),
+        folders,
+    };
+    match call(pipe, &req)? {
+        Response::RepoInitialized { recovery_key } => Ok(recovery_key),
+        r => Err(unexpected(r)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,13 +244,14 @@ mod tests {
                 frozen_since: Some("2026-10-24T10:00:00Z".into()),
                 freeze_reasons: vec![],
                 same_physical_disk: false,
-                last_run: None,
-                last_backup: None,
+                last_run: Some(1_700_000_000),
+                last_backup: Some(1_700_000_000),
                 last_check: None,
                 pending_deletes: vec![],
             }
         });
         let s = on_thread(move || status(&pipe)).await.unwrap();
+        assert_eq!(s.last_run, Some(1_700_000_000));
         assert!(s.frozen);
         assert_eq!(s.frozen_since.as_deref(), Some("2026-10-24T10:00:00Z"));
         h.await.unwrap();
@@ -274,6 +311,55 @@ mod tests {
         let e = on_thread(move || backup(&pipe)).await.unwrap_err();
         assert_eq!(e.kind, ErrorKind::Service);
         assert_eq!(e.message, "wrong password");
+        h.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folders_and_set_folders() {
+        let (pipe, h) = fake_server("folders", 3, |req| match req {
+            Request::ListFolders => Response::Folders {
+                folders: vec!["C:/A".into()],
+            },
+            Request::SetFolders { folders, password } => {
+                assert_eq!(folders, vec!["C:/B".to_string()]);
+                match password.as_deref() {
+                    Some("pw") => Response::Done,
+                    _ => Response::Error {
+                        message: "password wrong".into(),
+                    },
+                }
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+        let (p2, p3) = (pipe.clone(), pipe.clone());
+        let l = on_thread(move || folders(&pipe)).await.unwrap();
+        assert_eq!(l, vec!["C:/A".to_string()]);
+        let e = on_thread(move || set_folders(&p2, vec!["C:/B".into()], None))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("not right"));
+        on_thread(move || set_folders(&p3, vec!["C:/B".into()], Some("pw".into())))
+            .await
+            .unwrap();
+        h.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn init_repo_returns_key() {
+        let (pipe, h) = fake_server("init", 1, |req| match req {
+            Request::InitRepo { password, folders } => {
+                assert_eq!(password, "pw");
+                assert_eq!(folders, vec!["C:/A".to_string()]);
+                Response::RepoInitialized {
+                    recovery_key: "KEY".into(),
+                }
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+        let k = on_thread(move || init_repo(&pipe, "pw", vec!["C:/A".into()]))
+            .await
+            .unwrap();
+        assert_eq!(k, "KEY");
         h.await.unwrap();
     }
 

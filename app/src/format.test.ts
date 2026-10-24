@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lastBefore, relativeTime, sizeLabel, snapshotLabel } from "./format";
+import { keyGroups, lastBackupLine, lastBefore, relativeTime, sizeLabel, snapshotLabel } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -49,5 +49,29 @@ describe("sizeLabel", () => {
   it("formats sizes", () => {
     expect(sizeLabel(500 * 1024 ** 3)).toBe("500 GB");
     expect(sizeLabel(2 * 1024 ** 4)).toBe("2.0 TB");
+  });
+});
+
+describe("lastBackupLine", () => {
+  it("shows relative time from unix seconds", () => {
+    const secs = new Date(2026, 9, 24, 14, 50).getTime() / 1000;
+    expect(lastBackupLine(secs, now)).toBe("Last backup: 10 minutes ago");
+  });
+  it("says none yet without a run", () => {
+    expect(lastBackupLine(null, now)).toBe("Last backup: none yet");
+    expect(lastBackupLine(undefined, now)).toBe("Last backup: none yet");
+  });
+});
+
+describe("keyGroups", () => {
+  it("makes 6 even groups", () => {
+    expect(keyGroups("ABCDEFGHIJKLMNOPQRSTUVWX")).toEqual(["ABCD", "EFGH", "IJKL", "MNOP", "QRST", "UVWX"]);
+  });
+  it("ignores spaces and dashes and spreads the remainder", () => {
+    expect(keyGroups("ABCD-EFGH IJ")).toEqual(["AB", "CD", "EF", "GH", "I", "J"]);
+  });
+  it("copes with empty and very short keys", () => {
+    expect(keyGroups("")).toEqual([]);
+    expect(keyGroups("AB")).toEqual(["A", "B"]);
   });
 });

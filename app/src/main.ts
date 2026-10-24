@@ -2,7 +2,7 @@ import "./style.css";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { api, toApiError, type ApiError, type Disk, type HomeState, type Snapshot } from "./api";
-import { lastBefore, relativeTime, sizeLabel, snapshotLabel } from "./format";
+import { keyGroups, lastBackupLine, lastBefore, sizeLabel, snapshotLabel } from "./format";
 
 type Child = Node | string | null | undefined | false;
 type Attrs = Record<string, string | boolean | ((e: Event) => void)>;
@@ -61,6 +61,58 @@ async function render() {
   }
 }
 
+// ---------- Password dialog ----------
+
+/**
+ * Ask for the Lifeboat password in a simple dialog. `submit` does the work; if it throws, the
+ * plain-words message is shown in the dialog (wrong password, locked) and the user can retry.
+ */
+function askPassword(text: string, submit: (password: string) => Promise<void>): void {
+  const pw = h("input", { type: "password", id: "dlg-pw", autocomplete: "off" }) as HTMLInputElement;
+  const msg = h("div", { role: "alert" });
+  const ok = h("button", { type: "button", class: "primary" }, "Continue") as HTMLButtonElement;
+  const cancel = h("button", { type: "button" }, "Cancel");
+  const box = h(
+    "div",
+    { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "dlg-title" },
+    h("h2", { id: "dlg-title" }, "Type your password"),
+    h("p", {}, text),
+    h("label", { for: "dlg-pw" }, "Lifeboat password"),
+    pw,
+    msg,
+    h("div", { class: "row" }, ok, cancel),
+  );
+  const overlay = h("div", { class: "overlay" }, box);
+  const close = () => overlay.remove();
+  const go = async () => {
+    ok.disabled = true;
+    msg.replaceChildren();
+    try {
+      await submit(pw.value);
+      close();
+    } catch (e) {
+      msg.replaceChildren(errorBox(toApiError(e)));
+      pw.select();
+      ok.disabled = false;
+    }
+  };
+  ok.addEventListener("click", () => void go());
+  cancel.addEventListener("click", close);
+  pw.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") void go();
+    if ((e as KeyboardEvent).key === "Escape") close();
+  });
+  document.body.append(overlay);
+  pw.focus();
+}
+
+function removeWithPassword(folder: string, draw: (folders: string[]) => void): void {
+  askPassword(
+    `To stop backing up ${folder}, please type your Lifeboat password. This keeps anyone else from switching your backups off.`,
+    async (password) => draw(await api.removeFolder(folder, password)),
+  );
+}
+
 // ---------- Home ----------
 
 async function renderHome(body: HTMLElement) {
@@ -71,9 +123,9 @@ async function renderHome(body: HTMLElement) {
     : h(
         "div",
         { class: "card status ok", role: "status" },
-        st.last_backup
-          ? `Your files are safe. Last backup ${relativeTime(st.last_backup)}`
-          : "No backup yet. Press the big button below.",
+        st.status.last_run == null
+          ? "No backup yet. Press the big button below."
+          : `Your files are safe. ${lastBackupLine(st.status.last_run)}`,
       );
   body.append(card);
   if (frozen) {
@@ -109,7 +161,7 @@ async function renderHome(body: HTMLElement) {
               "li",
               { class: "row" },
               h("span", { class: "grow" }, f),
-              h("button", { type: "button", "aria-label": `Remove ${f}`, onclick: async () => draw(await api.removeFolder(f)) }, "Remove"),
+              h("button", { type: "button", "aria-label": `Remove ${f}`, onclick: () => removeWithPassword(f, draw) }, "Remove"),
             ),
           )
         : [h("li", { class: "muted" }, "No folders chosen yet.")]),
@@ -124,7 +176,12 @@ async function renderHome(body: HTMLElement) {
         type: "button",
         onclick: async () => {
           const picked = await open({ directory: true, multiple: false, title: "Choose a folder to back up" });
-          if (typeof picked === "string") draw(await api.addFolder(picked));
+          if (typeof picked !== "string") return;
+          try {
+            draw(await api.addFolder(picked));
+          } catch (e) {
+            status.replaceChildren(errorBox(toApiError(e)));
+          }
         },
       },
       "Add a folder",
@@ -275,6 +332,34 @@ async function renderSetup(body: HTMLElement) {
   const gb = h("input", { type: "number", id: "gb", min: "1" }) as HTMLInputElement;
   const go1 = h("button", { type: "button", class: "primary big" }, "Prepare this drive") as HTMLButtonElement;
   const result = h("div", { role: "status", "aria-live": "polite" });
+  // The drive can be prepared while the backup store step fails: then only the last step is retried.
+  let prepared = false;
+  const folders: string[] = [];
+  const folderList = h("ul", { class: "plain" });
+  const drawFolders = () =>
+    folderList.replaceChildren(
+      ...(folders.length
+        ? folders.map((f) =>
+            h(
+              "li",
+              { class: "row" },
+              h("span", { class: "grow" }, f),
+              h(
+                "button",
+                {
+                  type: "button",
+                  "aria-label": `Remove ${f}`,
+                  onclick: () => {
+                    folders.splice(folders.indexOf(f), 1);
+                    drawFolders();
+                  },
+                },
+                "Remove",
+              ),
+            ),
+          )
+        : [h("li", { class: "muted" }, "No folders chosen yet. You can also add them later on the Home screen.")]),
+    );
 
   function drawDetail() {
     if (!selected) return detail.replaceChildren();
@@ -290,6 +375,22 @@ async function renderSetup(body: HTMLElement) {
             gb,
           )
         : h("label", { class: "check" }, sure, "I understand everything on this drive will be erased."),
+      h("h2", {}, "Folders to back up"),
+      folderList,
+      h(
+        "button",
+        {
+          type: "button",
+          onclick: async () => {
+            const picked = await open({ directory: true, multiple: false, title: "Choose a folder to back up" });
+            if (typeof picked === "string" && !folders.some((f) => f.toLowerCase() === picked.toLowerCase())) {
+              folders.push(picked);
+              drawFolders();
+            }
+          },
+        },
+        "Add a folder",
+      ),
       h("label", { for: "spw" }, "Choose a Lifeboat password (at least 8 characters)"),
       pw,
       h("label", { for: "spw2" }, "Type it again"),
@@ -305,23 +406,58 @@ async function renderSetup(body: HTMLElement) {
     if (!internal && !sure.checked) return void result.replaceChildren(h("div", { class: "banner" }, "Please tick the box to confirm."));
     if (pw.value !== pw2.value) return void result.replaceChildren(h("div", { class: "banner" }, "The two passwords are not the same."));
     go1.disabled = true;
-    result.replaceChildren(h("p", {}, "Preparing the drive. Please wait..."));
     try {
-      await api.prepareDisk(
-        selected.number,
-        pw.value,
-        internal ? { driveLetter: letter.value, sizeGb: Number(gb.value) } : undefined,
-      );
+      if (!prepared) {
+        result.replaceChildren(h("p", {}, "Preparing the drive. Please wait..."));
+        await api.prepareDisk(
+          selected.number,
+          pw.value,
+          internal ? { driveLetter: letter.value, sizeGb: Number(gb.value) } : undefined,
+        );
+        prepared = true;
+      }
+      result.replaceChildren(h("p", {}, "Setting up your backups. Please wait..."));
+      const key = await api.initRepo(pw.value, folders);
       pw.value = pw2.value = "";
-      result.replaceChildren(h("div", { class: "card status ok" }, "Done. Your backup drive is ready."));
+      showRecoveryKey(body, key);
+      return;
     } catch (e) {
       result.replaceChildren(errorBox(toApiError(e)));
+      if (prepared) go1.textContent = "Try the last step again";
     }
     go1.disabled = false;
   });
 
   body.append(h("h2", {}, "Choose a drive"), disks.length ? list : h("p", {}, "No drives found."), detail, result);
   draw();
+  drawFolders();
+}
+
+/** Show the recovery key once, large, in 6 groups. Continue only after "I've saved it". */
+function showRecoveryKey(body: HTMLElement, key: string) {
+  const groups = keyGroups(key);
+  const saved = h("input", { type: "checkbox", id: "saved" }) as HTMLInputElement;
+  const next = h("button", { type: "button", class: "primary big", disabled: true }, "Continue") as HTMLButtonElement;
+  saved.addEventListener("change", () => (next.disabled = !saved.checked));
+  next.addEventListener("click", () => go("home"));
+  body.replaceChildren(
+    h("h2", {}, "Your recovery key"),
+    h(
+      "p",
+      {},
+      "If you ever forget your password, this key is the only other way to open your backups. Lifeboat shows it only this one time and does not keep a copy.",
+    ),
+    h(
+      "div",
+      { id: "key-print" },
+      h("h2", { class: "print-only" }, "Lifeboat recovery key"),
+      h("div", { class: "key", "aria-label": "Recovery key" }, ...groups.map((g) => h("span", { class: "key-group" }, g))),
+      h("p", { class: "print-only" }, "Keep this safe. Anyone who has this key can open your backups. Do not store it on this computer."),
+    ),
+    h("button", { type: "button", class: "big", onclick: () => window.print() }, "Print this key"),
+    h("label", { class: "check", for: "saved" }, saved, "I've saved it"),
+    next,
+  );
 }
 
 // ---------- Live updates from the tray / poller ----------
