@@ -90,6 +90,9 @@ fn tag_key_retention_check_with_real_restic() {
     e.apply_retention().unwrap();
     assert_eq!(e.snapshots().unwrap().len(), 1, "pre-alert snapshot kept");
     e.check_subset().unwrap();
-    e.forget_snapshots(&[id]).unwrap();
+    // `restic tag` rewrites the snapshot under a new id, so take the current one.
+    let new_id = e.snapshots().unwrap()[0].id.clone();
+    assert_ne!(new_id, id);
+    e.forget_snapshots(&[new_id]).unwrap();
     assert!(e.snapshots().unwrap().is_empty());
 }
