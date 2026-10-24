@@ -1,60 +1,94 @@
-//! The list of folders the user wants backed up, kept by the UI as a small JSON file.
+//! One-time move of the old UI-only `folders.json` into the service's folder list.
 //!
-//! NOTE: the service has no command yet to receive this list (its folders still come from its
-//! own config), so for now this is the list the UI shows and keeps.
+//! Older versions of the app kept their own list that the service never read. On startup, if
+//! that file exists and the service has no folders yet, the list is sent to the service once
+//! and the file is deleted.
 
 use std::fs;
 use std::path::Path;
 
-pub fn load(file: &Path) -> Vec<String> {
-    fs::read_to_string(file)
+/// What happened to the old file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Migration {
+    /// No old file: nothing to do.
+    NoFile,
+    /// The service could not be asked or told; try again later.
+    Retry,
+    /// The old file was sent (or not needed) and deleted.
+    Done,
+}
+
+/// `current` asks the service for its folders; `send` replaces them.
+pub fn migrate(
+    file: &Path,
+    current: impl FnOnce() -> Option<Vec<String>>,
+    send: impl FnOnce(Vec<String>) -> bool,
+) -> Migration {
+    if !file.exists() {
+        return Migration::NoFile;
+    }
+    let Some(service) = current() else {
+        return Migration::Retry;
+    };
+    let old: Vec<String> = fs::read_to_string(file)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save(file: &Path, list: &[String]) -> Result<(), String> {
-    if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        .unwrap_or_default();
+    if service.is_empty() && !old.is_empty() && !send(old) {
+        return Migration::Retry;
     }
-    let s = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-    fs::write(file, s).map_err(|e| e.to_string())
-}
-
-pub fn add(file: &Path, folder: &str) -> Result<Vec<String>, String> {
-    let mut list = load(file);
-    let folder = folder.trim().to_string();
-    if !folder.is_empty() && !list.iter().any(|f| f.eq_ignore_ascii_case(&folder)) {
-        list.push(folder);
-        save(file, &list)?;
-    }
-    Ok(list)
-}
-
-pub fn remove(file: &Path, folder: &str) -> Result<Vec<String>, String> {
-    let mut list = load(file);
-    list.retain(|f| !f.eq_ignore_ascii_case(folder));
-    save(file, &list)?;
-    Ok(list)
+    let _ = fs::remove_file(file);
+    Migration::Done
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    fn temp(name: &str, content: Option<&str>) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("lifeboat-mig-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let f = d.join("folders.json");
+        if let Some(c) = content {
+            fs::write(&f, c).unwrap();
+        }
+        f
+    }
 
     #[test]
-    fn add_remove_roundtrip() {
-        let d = std::env::temp_dir().join(format!("lifeboat-folders-{}", std::process::id()));
-        let f = d.join("folders.json");
-        let _ = fs::remove_dir_all(&d);
-        assert!(load(&f).is_empty());
-        add(&f, r"C:\Users\Dad\Documents").unwrap();
-        add(&f, r"c:\users\dad\documents").unwrap();
-        let l = add(&f, r"C:\Users\Dad\Pictures").unwrap();
-        assert_eq!(l.len(), 2);
-        assert_eq!(load(&f), l);
-        let l = remove(&f, r"C:\Users\Dad\Documents").unwrap();
-        assert_eq!(l, vec![r"C:\Users\Dad\Pictures".to_string()]);
-        fs::remove_dir_all(&d).unwrap();
+    fn sends_once_and_deletes() {
+        let f = temp("send", Some(r#"["C:\\Docs"]"#));
+        let sent = RefCell::new(vec![]);
+        let r = migrate(
+            &f,
+            || Some(vec![]),
+            |l| {
+                *sent.borrow_mut() = l;
+                true
+            },
+        );
+        assert_eq!(r, Migration::Done);
+        assert_eq!(*sent.borrow(), vec![r"C:\Docs".to_string()]);
+        assert!(!f.exists());
+        assert_eq!(migrate(&f, || panic!(), |_| panic!()), Migration::NoFile);
+    }
+
+    #[test]
+    fn keeps_file_when_service_down_or_send_fails() {
+        let f = temp("retry", Some(r#"["C:\\Docs"]"#));
+        assert_eq!(migrate(&f, || None, |_| true), Migration::Retry);
+        assert!(f.exists());
+        assert_eq!(migrate(&f, || Some(vec![]), |_| false), Migration::Retry);
+        assert!(f.exists());
+    }
+
+    #[test]
+    fn does_not_overwrite_a_service_list() {
+        let f = temp("nonempty", Some(r#"["C:\\Old"]"#));
+        let r = migrate(&f, || Some(vec!["D:/New".into()]), |_| panic!("must not send"));
+        assert_eq!(r, Migration::Done);
+        assert!(!f.exists());
     }
 }

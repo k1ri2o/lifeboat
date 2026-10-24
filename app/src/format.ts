@@ -67,3 +67,29 @@ export function sizeLabel(bytes: number): string {
   if (gb >= 10) return `${Math.round(gb)} GB`;
   return `${gb.toFixed(1)} GB`;
 }
+
+/** "Last backup: 10 minutes ago", or a plain note when there has been none. `secs` = unix seconds. */
+export function lastBackupLine(secs: number | null | undefined, now: Date = new Date()): string {
+  if (secs == null) return "Last backup: none yet";
+  return `Last backup: ${relativeTime(new Date(secs * 1000).toISOString(), now)}`;
+}
+
+/**
+ * Split a recovery key into 6 groups for easy copying by hand. Spaces and dashes in the key
+ * are ignored. Groups are as even as possible, earlier groups longer.
+ */
+export function keyGroups(key: string, groups = 6): string[] {
+  const clean = key.replace(/[\s-]+/g, "");
+  if (!clean) return [];
+  const size = Math.floor(clean.length / groups);
+  const extra = clean.length % groups;
+  const out: string[] = [];
+  let pos = 0;
+  for (let i = 0; i < groups; i++) {
+    const len = size + (i < extra ? 1 : 0);
+    if (len === 0) break;
+    out.push(clean.slice(pos, pos + len));
+    pos += len;
+  }
+  return out;
+}
