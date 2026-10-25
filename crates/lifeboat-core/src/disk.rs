@@ -42,6 +42,10 @@ pub fn same_guid(a: &str, b: &str) -> bool {
     !a.is_empty() && a == norm_guid(b)
 }
 
+/// Smallest partition that can be Lifeboat's. Setup always creates whole gigabytes, so
+/// anything smaller is someone else's (e.g. the 1 MB "UEFI_NTFS" partition Rufus leaves).
+pub const MIN_LIFEBOAT_SIZE: u64 = 512 * 1024 * 1024;
+
 /// One partition of a disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionInfo {
@@ -69,6 +73,7 @@ impl PartitionInfo {
     /// [`PartitionInfo::has_guid`].
     pub fn is_lifeboat(&self) -> bool {
         is_basic_data_type(&self.gpt_type)
+            && self.size >= MIN_LIFEBOAT_SIZE
             && (self.is_hidden || self.no_default_letter)
             && self.drive_letter.is_none()
     }
@@ -146,7 +151,7 @@ mod tests {
         PartitionInfo {
             number: 1,
             offset: 0,
-            size: 1,
+            size: MIN_LIFEBOAT_SIZE,
             gpt_type: BASIC_DATA_TYPE_GUID.into(),
             drive_letter: letter,
             is_hidden: hidden,
@@ -171,6 +176,17 @@ mod tests {
             ..part(false, None, "{L}")
         };
         assert!(in_use.is_lifeboat());
+    }
+
+    #[test]
+    fn tiny_partition_is_not_lifeboat() {
+        // Rufus leaves a 1 MB FAT "UEFI_NTFS" partition with no drive letter.
+        let rufus = PartitionInfo {
+            size: 1_064_448,
+            no_default_letter: true,
+            ..part(false, None, "{R}")
+        };
+        assert!(!rufus.is_lifeboat());
     }
 
     #[test]

@@ -112,7 +112,7 @@ mod tests {
         PartitionInfo {
             number: 1,
             offset: 0,
-            size: 1,
+            size: 1 << 30,
             gpt_type: guid.into(),
             drive_letter: None,
             is_hidden: true,

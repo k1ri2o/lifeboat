@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn list_carries_guid_and_hidden() {
-        let j = r#"[{"Number":1,"Partitions":[{"Number":1,"GptType":"{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}","IsHidden":true,"Guid":"{g1}","DriveLetter":""}]}]"#;
+        let j = r#"[{"Number":1,"Partitions":[{"Number":1,"Size":10737418240,"GptType":"{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}","IsHidden":true,"Guid":"{g1}","DriveLetter":""}]}]"#;
         let d = parse_disks(j).unwrap();
         assert!(d[0].partitions[0].is_hidden);
         assert_eq!(d[0].partitions[0].guid, "{g1}");
