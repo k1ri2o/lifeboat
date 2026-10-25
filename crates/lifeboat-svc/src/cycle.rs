@@ -106,11 +106,12 @@ fn vault_remove_item(e: &lifeboat_engine::Engine, path: &str) -> Result<(), Stri
                 others += 1;
             }
         }
-        return match vault_action(others) {
+        // Every copy goes: an item added twice lives in more than one snapshot.
+        match vault_action(others) {
             VaultAction::Forget => e.forget_snapshots(std::slice::from_ref(&s.id)),
             VaultAction::Rewrite => e.rewrite_exclude(&s.id, &rp),
         }
-        .map_err(|e| e.to_string());
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
