@@ -2,7 +2,7 @@ import "./style.css";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { desktopDir, join } from "@tauri-apps/api/path";
-import { api, toApiError, type Disk, type FileEntry, type HomeState, type Snapshot as Version } from "./api";
+import { api, toApiError, type Disk, type FileEntry, type HomeState, type VaultItem, type Snapshot as Version } from "./api";
 import {
   folderParts,
   isStale,
@@ -20,7 +20,8 @@ import {
   snapshotLabel,
   inlineTimeLabel,
 } from "./format";
-import { adminButton, button, errorBox, h, icon, spinner, type Child } from "./ui";
+import { adminButton, button, errorBox, h, icon, skeleton, spinner, type Child } from "./ui";
+import { fetchFresh, guard, invalidate, peek, sig, swr } from "./cache";
 
 type Screen = "home" | "restore" | "vault" | "settings" | "setup";
 let screen: Screen = "home";
@@ -28,52 +29,97 @@ let screen: Screen = "home";
 let preselect: string | undefined;
 const app = document.getElementById("app")!;
 
+/** Latest-wins guard for whole screens: an answer for a screen the user already left is dropped. */
+const nav = guard();
+
 function go(s: Screen) {
   screen = s;
-  void listen("status-changed", refresh);
-  void listen("backup-done", refresh);
-  void listen("service-down", refresh);
   void render();
 }
 
-// ---------- Shell ----------
+// ---------- Shell (built once, kept across screens so nothing flashes) ----------
 
-function shell(body: HTMLElement, withNav: boolean): HTMLElement {
-  const brand = h("div", { class: "brand" }, icon("lifebuoy", 26), h("span", {}, "Lifeboat"));
-  const item = (s: Screen, label: string, ic: "home" | "restore" | "vault" | "settings") =>
-    h(
-      "button",
-      { type: "button", class: "nav-item", "aria-current": screen === s ? "page" : "false", onclick: () => go(s) },
-      icon(ic, 20),
-      h("span", {}, label),
-    );
-  const nav = withNav
-    ? h("nav", { "aria-label": "Main" }, item("home", "Home", "home"), item("restore", "Restore", "restore"), item("vault", "Vault", "vault"), item("settings", "Settings", "settings"))
-    : null;
-  return h("div", { class: "shell" }, h("header", {}, brand, nav), h("main", { id: "main" }, body));
+let shellEl: HTMLElement | null = null;
+let mainEl: HTMLElement;
+const railItems = new Map<Screen, HTMLElement>();
+
+function mountShell(withNav: boolean): HTMLElement {
+  if (!shellEl) {
+    const brand = h("div", { class: "brand" }, icon("lifebuoy", 28), h("span", {}, "Lifeboat"));
+    const item = (s: Screen, label: string, ic: "home" | "restore" | "vault" | "settings") => {
+      const b = h("button", { type: "button", class: "nav-item", onclick: () => go(s) }, icon(ic, 20), h("span", {}, label));
+      railItems.set(s, b);
+      return b;
+    };
+    const rail = h("aside", { class: "rail" }, brand, h("nav", { "aria-label": "Main" }, item("home", "Home", "home"), item("restore", "Restore", "restore"), item("vault", "Vault", "vault"), item("settings", "Settings", "settings")));
+    mainEl = h("main", { id: "main" });
+    shellEl = h("div", { class: "shell" }, rail, mainEl);
+    app.replaceChildren(shellEl);
+  }
+  shellEl.classList.toggle("no-rail", !withNav);
+  for (const [s, el] of railItems) el.setAttribute("aria-current", screen === s ? "page" : "false");
+  return mainEl;
 }
 
 function pageTitle(text: string, sub?: string): HTMLElement {
   return h("div", { class: "page-head" }, h("h1", {}, text), sub ? h("p", { class: "muted lead" }, sub) : null);
 }
 
+/** Put a fresh page into the window, scrolled to the top. */
+function showPage(body: HTMLElement) {
+  mountShell(screen !== "setup").replaceChildren(body);
+}
+
 async function render() {
+  const token = nav.next();
+  const alive = () => nav.isCurrent(token);
   const body = h("div", { class: "page" });
-  app.replaceChildren(shell(body, screen !== "setup"));
+  showPage(body);
+  window.scrollTo(0, 0);
+  if (screen === "setup") return void renderSetup(body).catch((e) => alive() && showFail(body, e));
+  // Cached data shows at once; fresh data replaces it only when it differs.
+  if (!peek("home")) body.append(pageTitle(titleFor(screen)), skeleton(4));
+  await swr<HomeState>("home", () => api.homeState(), {
+    alive,
+    onData: (st, fromCache) => {
+      if (screen === "home" && isFirstRun(st)) {
+        screen = "setup";
+        return void render();
+      }
+      const page = h("div", { class: "page" });
+      const draw = screen === "home" ? () => renderHome(page, st) : screen === "restore" ? () => renderRestore(page, st, alive) : screen === "vault" ? () => renderVault(page, alive) : () => renderSettings(page, st);
+      mainEl.replaceChildren(page);
+      void Promise.resolve(draw()).catch((e) => alive() && showFail(page, e));
+      void fromCache;
+    },
+    onError: (e) => showFail(body, e),
+  });
+}
+
+function titleFor(s: Screen): string {
+  return s === "restore" ? "Restore your files" : s === "vault" ? "Vault" : s === "settings" ? "Settings" : "Lifeboat";
+}
+
+function showFail(body: HTMLElement, e: unknown) {
+  body.replaceChildren(pageTitle("Lifeboat"), errorBox(toApiError(e), () => void render()));
+}
+
+/** Saved versions: cached after the first look, refreshed quietly. */
+const fetchSnaps = () => api.snapshots();
+function snapsSwr(onData: (s: Version[]) => void, onError?: (e: unknown) => void, alive?: () => boolean) {
+  return swr<Version[]>("snaps", fetchSnaps, { onData, onError, alive });
+}
+
+/** Run `fn` with the button switched off, so a double click cannot start it twice. Never rejects. */
+async function busy1(btn: HTMLButtonElement, fn: () => Promise<void>): Promise<void> {
+  if (btn.disabled) return;
+  btn.disabled = true;
   try {
-    if (screen === "setup") return renderSetup(body);
-    // First run: nothing backed up and nothing chosen yet means the wizard comes first.
-    const st = await api.homeState();
-    if (screen === "home" && isFirstRun(st)) {
-      screen = "setup";
-      return void render();
-    }
-    if (screen === "home") renderHome(body, st);
-    else if (screen === "restore") await renderRestore(body, st);
-    else if (screen === "vault") await renderVault(body);
-    else renderSettings(body, st);
-  } catch (e) {
-    body.replaceChildren(pageTitle("Lifeboat"), errorBox(toApiError(e), () => void render()));
+    await fn();
+  } catch {
+    /* each caller shows its own message; this only stops an unhandled rejection */
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -158,6 +204,8 @@ function renderHome(body: HTMLElement, st: HomeState) {
     busy.textContent = "Backing up your files. This can take a few minutes...";
     try {
       await api.backupNow();
+      invalidate("snaps");
+      await fetchFresh("home", () => api.homeState());
       await render();
     } catch (e) {
       backupBtn.disabled = false;
@@ -172,7 +220,7 @@ function renderHome(body: HTMLElement, st: HomeState) {
     icon: "folder",
     onclick: async () => {
       try {
-        const snaps = await api.snapshots();
+        const snaps = peek<Version[]>("snaps") ?? (await fetchFresh("snaps", fetchSnaps));
         preselect = [...snaps].sort((a, b) => b.time.localeCompare(a.time))[0]?.id;
         go("restore");
       } catch (e) {
@@ -180,10 +228,10 @@ function renderHome(body: HTMLElement, st: HomeState) {
       }
     },
   });
-  void api
-    .snapshots()
-    .then((snaps) => versions.replaceChildren(document.createTextNode(snaps.length ? versionCountLine(snaps.length) : "No saved versions yet")))
-    .catch(() => versions.replaceChildren());
+  void snapsSwr(
+    (snaps) => versions.replaceChildren(document.createTextNode(snaps.length ? versionCountLine(snaps.length) : "No saved versions yet")),
+    () => versions.replaceChildren(),
+  );
 
   let card: HTMLElement;
   if (health === "paused") {
@@ -207,9 +255,8 @@ function renderHome(body: HTMLElement, st: HomeState) {
       ),
     );
     // Find the last good version from before the problem and offer it in one big button.
-    void api
-      .snapshots()
-      .then((snaps) => {
+    void snapsSwr(
+      (snaps) => {
         const safe = since ? lastBefore(snaps, since) : undefined;
         const holder = card.querySelector("#paused-actions")!;
         holder.replaceChildren(
@@ -222,8 +269,9 @@ function renderHome(body: HTMLElement, st: HomeState) {
             },
           }),
         );
-      })
-      .catch((e) => message.replaceChildren(errorBox(e)));
+      },
+      (e) => message.replaceChildren(errorBox(e)),
+    );
   } else if (health === "attention") {
     const never = status.last_run == null;
     card = h(
@@ -274,15 +322,17 @@ function renderHome(body: HTMLElement, st: HomeState) {
   draw(st.folders);
   const add = button("Add a folder", {
     icon: "plus",
-    onclick: async () => {
-      const picked = await pickFolder("Choose a folder to protect");
-      if (!picked) return;
-      try {
-        draw(await api.addFolder(picked));
-      } catch (e) {
-        message.replaceChildren(errorBox(e));
-      }
-    },
+    onclick: (e) =>
+      void busy1(e.currentTarget as HTMLButtonElement, async () => {
+        const picked = await pickFolder("Choose a folder to protect");
+        if (!picked) return;
+        try {
+          draw(await api.addFolder(picked));
+          invalidate("home");
+        } catch (err) {
+          message.replaceChildren(errorBox(err));
+        }
+      }),
   });
 
   body.append(
@@ -393,13 +443,17 @@ function insideChosen(path: string, chosen: Iterable<string>): boolean {
 
 // ---------- Restore ----------
 
-async function renderRestore(body: HTMLElement, home: HomeState) {
+async function renderRestore(body: HTMLElement, home: HomeState, alive: () => boolean = () => true) {
   body.append(pageTitle("Restore your files", "Go back to how your files looked at an earlier time."));
-  const loading = spinner("Looking for your saved versions...");
-  body.append(loading);
-  const versions: Version[] = [...(await api.snapshots())].sort((a, b) => b.time.localeCompare(a.time));
+  let loading: HTMLElement | null = null;
+  if (!peek("snaps")) body.append((loading = skeleton(4)));
+  const raw = peek<Version[]>("snaps") ?? (await fetchFresh("snaps", fetchSnaps));
+  const versions: Version[] = [...raw].sort((a, b) => b.time.localeCompare(a.time));
   const defaultTarget = await defaultRestoreTarget();
-  loading.remove();
+  if (!alive()) return;
+  loading?.remove();
+  // Quietly pick up new versions in the background; the screen only redraws when the list changed.
+  void swr<Version[]>("snaps", fetchSnaps, { alive, onData: (v, cached) => { if (!cached && sig(v) !== sig(raw)) void render(); } });
   if (!versions.length) {
     body.append(h("div", { class: "card empty-state" }, icon("restore", 32), h("p", {}, "There is nothing to restore yet. Once your first backup is done, it will show up here.")));
     return;
@@ -459,6 +513,8 @@ async function renderRestore(body: HTMLElement, home: HomeState) {
 
   const drawFiles = (items: FileEntry[]) => {
     if (!items.length) return fileList.replaceChildren(h("li", { class: "muted empty" }, "This folder is empty."));
+    const keepScroll = fileList.scrollTop;
+    queueMicrotask(() => (fileList.scrollTop = keepScroll));
     fileList.replaceChildren(
       ...items.map((f, i) => {
         const covered = insideChosen(f.path, sel.keys());
@@ -501,13 +557,14 @@ async function renderRestore(body: HTMLElement, home: HomeState) {
   const loadLevel = async () => {
     const mine = ++token;
     drawCrumbs();
-    fileList.replaceChildren(h("li", {}, spinner("Opening...")));
-    try {
-      const items = [...(await api.listFiles(chosen, trail[trail.length - 1].path))].sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
-      if (mine === token) drawFiles(items);
-    } catch (e) {
-      if (mine === token) fileList.replaceChildren(h("li", {}, errorBox(e, () => void loadLevel())));
-    }
+    const key = `files:${chosen}:${trail[trail.length - 1].path ?? ""}`;
+    const sorted = (xs: FileEntry[]) => [...xs].sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+    if (!peek(key)) fileList.replaceChildren(h("li", {}, skeleton(5)));
+    await swr<FileEntry[]>(key, () => api.listFiles(chosen, trail[trail.length - 1].path), {
+      alive: () => mine === token && alive(),
+      onData: (xs) => drawFiles(sorted(xs)),
+      onError: (e) => fileList.replaceChildren(h("li", {}, errorBox(e, () => void loadLevel()))),
+    });
   };
 
   const pickVersion = (id: string) => {
@@ -558,14 +615,15 @@ async function renderRestore(body: HTMLElement, home: HomeState) {
         icon("folder", 22),
         h("div", { class: "grow" }, targetText),
         button(target ? "Choose another folder" : "Choose a folder", {
-          onclick: async () => {
-            const picked = await pickFolder("Choose a new, empty folder");
-            if (picked) {
-              target = picked;
-              targetText.textContent = picked;
-              targetText.className = "";
-            }
-          },
+          onclick: (e) =>
+            void busy1(e.currentTarget as HTMLButtonElement, async () => {
+              const picked = await pickFolder("Choose a new, empty folder");
+              if (picked) {
+                target = picked;
+                targetText.textContent = picked;
+                targetText.className = "";
+              }
+            }),
         }),
       ),
     ),
@@ -600,7 +658,7 @@ function step(n: number, title: string, hint: string, content: Child): HTMLEleme
 
 // ---------- Vault ----------
 
-async function renderVault(body: HTMLElement) {
+async function renderVault(body: HTMLElement, alive: () => boolean = () => true) {
   const message = h("div", { "aria-live": "polite" });
   const listHolder = h("div", { class: "card flush" });
   const chosen = new Set<string>();
@@ -612,12 +670,10 @@ async function renderVault(body: HTMLElement) {
     takeOut.querySelector("span")!.textContent = chosen.size ? `Take out ${chosen.size} ${chosen.size === 1 ? "item" : "items"}` : "Take out";
   };
 
-  const loadList = async () => {
-    chosen.clear();
-    updateTakeOut();
-    listHolder.replaceChildren(spinner("Opening the vault..."));
-    try {
-      const items = [...(await api.vaultList())].sort((a, b) => b.added.localeCompare(a.added));
+  const drawList = (all: VaultItem[]) => {
+      chosen.clear();
+      updateTakeOut();
+      const items = [...all].sort((a, b) => b.added.localeCompare(a.added));
       if (!items.length) return listHolder.replaceChildren(h("p", { class: "muted empty" }, "The vault is empty. Add files or a folder to keep them only in the safe."));
       listHolder.replaceChildren(
         h(
@@ -643,11 +699,17 @@ async function renderVault(body: HTMLElement) {
           }),
         ),
       );
-    } catch (e) {
-      listHolder.replaceChildren(errorBox(e, () => void loadLevelAgain()));
-    }
   };
-  const loadLevelAgain = () => loadList();
+  /** Show the cached vault at once, then the fresh one only if it differs. `fresh` skips the cache after a change. */
+  const loadList = async (fresh = false) => {
+    if (fresh) invalidate("vault");
+    if (!peek("vault")) listHolder.replaceChildren(skeleton(4));
+    await swr<VaultItem[]>("vault", () => api.vaultList(), {
+      alive,
+      onData: drawList,
+      onError: (e) => listHolder.replaceChildren(errorBox(e, () => void loadList(true))),
+    });
+  };
 
   const addFlow = async (kind: "files" | "folder") => {
     message.replaceChildren();
@@ -668,12 +730,12 @@ async function renderVault(body: HTMLElement) {
         askPassword("Move to the vault", "Type your password so we know it is you.", async (password) => {
           const n = await api.vaultAdd(password, picked);
           message.replaceChildren(h("div", { class: "notice good" }, icon("check", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, n === 1 ? "1 item is now in the vault" : `${n} items are now in the vault`), h("p", { class: "muted" }, "Lifeboat checked the safe copy and removed the originals from your PC."))));
-          void loadList();
+          void loadList(true);
         }),
     );
   };
 
-  takeOut.addEventListener("click", async () => {
+  takeOut.addEventListener("click", () => void busy1(takeOut, async () => {
     message.replaceChildren();
     const folder = await pickFolder("Choose a new, empty folder to put the files in");
     if (!folder) return;
@@ -682,15 +744,15 @@ async function renderVault(body: HTMLElement) {
       const out = await api.vaultExtract(password, paths, folder);
       const where = out || folder;
       message.replaceChildren(doneBox("Your files are out of the vault", `They are in ${where}`, where));
-      void loadList();
+      void loadList(true);
     });
-  });
+  }).finally(() => updateTakeOut()));
 
   body.append(
     pageTitle("Vault", "A private place for files you want off this PC."),
     h("div", { class: "notice info" }, icon("vault", 22), h("div", { class: "notice-body" }, h("p", {}, "Files in the vault are kept only inside Lifeboat's hidden safe. They are removed from your PC after Lifeboat has checked the safe copy. If you forget the password and lose the recovery key, they are gone."))),
     h("p", { class: "muted" }, "Backed up: stays on your PC, a copy is in the safe. Vault: only in the safe."),
-    h("div", { class: "actions" }, button("Add files", { icon: "file", cls: "primary", onclick: () => void addFlow("files") }), button("Add a folder", { icon: "folder", onclick: () => void addFlow("folder") })),
+    h("div", { class: "actions" }, button("Add files", { icon: "file", cls: "primary", onclick: (e) => void busy1(e.currentTarget as HTMLButtonElement, () => addFlow("files")) }), button("Add a folder", { icon: "folder", onclick: (e) => void busy1(e.currentTarget as HTMLButtonElement, () => addFlow("folder")) })),
     message,
     h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", {}, "In the vault"), takeOut), listHolder),
   );
@@ -1002,7 +1064,17 @@ function showRecoveryKey(body: HTMLElement, key: string) {
 
 // ---------- Live updates from the tray / poller ----------
 
-const refresh = () => screen === "home" && void render();
+/** A tray or poller event: re-check quietly and redraw only when something really changed. */
+const refresh = async () => {
+  if (screen !== "home") return;
+  const before = sig(peek("home"));
+  try {
+    const st = await fetchFresh("home", () => api.homeState());
+    if (screen === "home" && sig(st) !== before) void render();
+  } catch {
+    /* the next event or click will show the problem */
+  }
+};
 
 // Dev-only: `?mock=ok|attention|attack|firstrun|error` swaps in fake data so screens can be previewed
 // in a plain browser. This import is removed from production builds.
@@ -1020,4 +1092,5 @@ async function start() {
   void listen("service-down", refresh);
   void render();
 }
+window.addEventListener("unhandledrejection", (ev) => ev.preventDefault());
 void start();

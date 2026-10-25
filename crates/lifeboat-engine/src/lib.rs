@@ -383,6 +383,28 @@ fn probe_result(r: Result<Output, Error>) -> Result<bool, Error> {
     }
 }
 
+/// Sort like [`children_of`]: folders first, then files, each by lowercase name.
+pub fn sort_nodes(v: &mut [LsNode]) {
+    v.sort_by(|a, b| {
+        b.dir
+            .cmp(&a.dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+}
+
+/// Group a whole-snapshot listing by parent folder (restic path, no trailing `/`); every
+/// group is sorted like [`children_of`].
+pub fn group_by_dir(nodes: Vec<LsNode>) -> std::collections::HashMap<String, Vec<LsNode>> {
+    let mut m: std::collections::HashMap<String, Vec<LsNode>> = std::collections::HashMap::new();
+    for n in nodes {
+        m.entry(split_restic(&n.path).0).or_default().push(n);
+    }
+    for v in m.values_mut() {
+        sort_nodes(v);
+    }
+    m
+}
+
 /// Wrapper around one restic repository.
 #[derive(Debug, Clone)]
 pub struct Engine {
@@ -533,6 +555,69 @@ impl Engine {
         args.push(&pat);
         let out = self.run(args)?;
         Ok(parse_ls(&String::from_utf8_lossy(&out.stdout)))
+    }
+
+    /// Every node of a snapshot from one `restic ls --json <id>` run. Gives up (kills restic,
+    /// returns `None`) when the snapshot has more than `max_nodes` nodes, so memory stays bounded.
+    pub fn ls_all_capped(
+        &self,
+        snapshot_id: &str,
+        max_nodes: usize,
+    ) -> Result<Option<Vec<LsNode>>, Error> {
+        use std::io::{BufRead, BufReader, Read};
+        use std::process::Stdio;
+        if !valid_snapshot_id(snapshot_id) {
+            return Err(Error::Parse(format!("bad snapshot id {snapshot_id:?}")));
+        }
+        let mut child = Command::new(&self.restic)
+            .arg("--repo")
+            .arg(&self.repo)
+            .arg("--no-cache")
+            .args(["ls", "--json", snapshot_id])
+            .env("RESTIC_PASSWORD", &self.password)
+            .env_remove("RESTIC_PASSWORD_FILE")
+            .env_remove("RESTIC_PASSWORD_COMMAND")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stderr = child.stderr.take();
+        let err_thread = std::thread::spawn(move || {
+            let mut s = String::new();
+            if let Some(mut e) = stderr {
+                let _ = e.read_to_string(&mut s);
+            }
+            s
+        });
+        let mut nodes = Vec::new();
+        let mut too_big = false;
+        if let Some(out) = child.stdout.take() {
+            for line in BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                nodes.extend(parse_ls(&line));
+                if nodes.len() > max_nodes {
+                    too_big = true;
+                    break;
+                }
+            }
+        }
+        if too_big {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = err_thread.join();
+            return Ok(None);
+        }
+        let status = child.wait()?;
+        let stderr = err_thread.join().unwrap_or_default().trim().to_string();
+        if !status.success() {
+            if is_disk_full(&stderr) {
+                return Err(Error::DiskFull { stderr });
+            }
+            return Err(Error::Restic {
+                code: status.code(),
+                stderr,
+            });
+        }
+        Ok(Some(nodes))
     }
 
     /// One folder level: the direct children of `restic_path`.
@@ -867,5 +952,35 @@ mod tests {
         for bad in ["", "-x", "a:b", "a b", "../x", "a/b"] {
             assert!(!valid_snapshot_id(bad), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    fn n(path: &str, dir: bool) -> LsNode {
+        LsNode {
+            name: split_restic(path).1,
+            path: path.into(),
+            dir,
+            size: 1,
+            mtime: String::new(),
+        }
+    }
+
+    #[test]
+    fn groups_by_parent_and_sorts() {
+        let g = group_by_dir(vec![
+            n("/C", true),
+            n("/C/b.txt", false),
+            n("/C/Z", true),
+            n("/C/a.txt", false),
+            n("/C/Z/x", false),
+        ]);
+        let c: Vec<_> = g["/C"].iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(c, ["Z", "a.txt", "b.txt"]);
+        assert_eq!(g["/C/Z"].len(), 1);
+        assert_eq!(g[""].len(), 1);
     }
 }

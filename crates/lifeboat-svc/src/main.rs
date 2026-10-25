@@ -1,7 +1,10 @@
 //! Lifeboat Windows service. Usage: `lifeboat-svc install|uninstall|run`.
 
+mod cache;
+mod ctx;
 mod cycle;
 mod dpapi;
+mod lease;
 mod scheduler;
 mod security;
 mod server;
@@ -73,9 +76,32 @@ fn run_console() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default();
         let _ = lifeboat_disk::hide_lifeboat_volume(&guid);
         tokio::spawn(scheduler::run(st.clone(), rx.clone()));
-        server::serve_default(st, rx).await
+        tokio::spawn(expire_leases(st.clone(), rx.clone()));
+        let st2 = st.clone();
+        let r = server::serve_default(st, rx).await;
+        release_lease(st2).await;
+        r
     })?;
     Ok(())
+}
+
+/// Every few seconds drop the volume lease once it has been idle for its full time (re-hides).
+async fn expire_leases(st: Arc<server::State>, mut stop: watch::Receiver<bool>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let st = st.clone();
+                let _ = tokio::task::spawn_blocking(move || st.ctx.lease.expire_idle()).await;
+            }
+            _ = stop.changed() => return,
+        }
+    }
+}
+
+/// On shutdown the volume must not stay unhidden.
+async fn release_lease(st: Arc<server::State>) {
+    let _ = tokio::task::spawn_blocking(move || st.ctx.lease.release_now()).await;
 }
 
 fn service_main(_args: Vec<OsString>) {
@@ -118,7 +144,11 @@ fn run_service() -> windows_service::Result<()> {
             .unwrap_or_default();
         let _ = lifeboat_disk::hide_lifeboat_volume(&guid);
         tokio::spawn(scheduler::run(st.clone(), rx.clone()));
-        server::serve_default(st, rx).await
+        tokio::spawn(expire_leases(st.clone(), rx.clone()));
+        let st2 = st.clone();
+        let r = server::serve_default(st, rx).await;
+        release_lease(st2).await;
+        r
     });
     status_handle
         .set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty()))?;

@@ -301,6 +301,64 @@ pub fn find_lifeboat_volume(partition_guid: &str) -> Result<Option<String>> {
     Ok(marker_matches(&marker, partition_guid).then_some(vol))
 }
 
+/// One PowerShell script that does the whole "open" step: bring `disk` online (only for a
+/// disk that is not shared with Windows or another drive), wait for the partition to show up,
+/// then unhide it and list its access paths ([`find_script`]). One process instead of three.
+pub fn open_volume_script(partition_guid: &str, disk: Option<u32>) -> String {
+    let (online, wait) = match disk {
+        Some(n) => (
+            format!("Set-Disk -Number {n} -IsOffline $false; "),
+            format!(
+                "$g = {}; for ($j = 0; $j -lt 40; $j++) {{                  if (Get-Partition | Where-Object {{ $_.Guid -eq $g }}) {{ break }};                  Start-Sleep -Milliseconds 250 }}; ",
+                quote(&braced(partition_guid))
+            ),
+        ),
+        None => (String::new(), String::new()),
+    };
+    format!("{online}{wait}{}", find_script(partition_guid))
+}
+
+/// One PowerShell script that does the whole "close" step: hide the partition again, and take
+/// `disk` offline (also when hiding failed).
+pub fn close_volume_script(partition_guid: &str, disk: Option<u32>) -> String {
+    match disk {
+        Some(n) => format!(
+            "try {{ {} }} finally {{ Set-Disk -Number {n} -IsOffline $true }}",
+            hide_script(partition_guid)
+        ),
+        None => hide_script(partition_guid),
+    }
+}
+
+/// Bring the disk online (when `disk` is given: a disk that holds only Lifeboat) and find,
+/// unhide and verify the Lifeboat volume, in a single PowerShell run. The volume path is the
+/// `\?\Volume{GUID}\` form: no drive letter, so nothing shows up in Explorer.
+pub fn open_volume(partition_guid: &str, disk: Option<&DiskInfo>) -> Result<Option<String>> {
+    if partition_guid.trim().is_empty() {
+        return Ok(None);
+    }
+    if let Some(d) = disk {
+        check(d, Op::SetOnline, true)?;
+    }
+    let out = ps::run(&open_volume_script(partition_guid, disk.map(|d| d.number)))?;
+    let Some(vol) = parse_volume_path(&out) else {
+        return Ok(None);
+    };
+    let marker = std::fs::read_to_string(format!("{vol}{MARKER_FILE}")).unwrap_or_default();
+    Ok(marker_matches(&marker, partition_guid).then_some(vol))
+}
+
+/// Undo [`open_volume`] in a single PowerShell run: hide the partition, take `disk` offline.
+pub fn close_volume(partition_guid: &str, disk: Option<&DiskInfo>) -> Result<()> {
+    if partition_guid.trim().is_empty() {
+        return Ok(());
+    }
+    if let Some(d) = disk {
+        check(d, Op::SetOffline, true)?;
+    }
+    ps::run(&close_volume_script(partition_guid, disk.map(|d| d.number))).map(|_| ())
+}
+
 fn set_offline(disk_number: u32, offline: bool) -> Result<()> {
     let disk = disk_by_number(disk_number)?;
     check(
@@ -391,6 +449,19 @@ mod tests {
         );
         assert_eq!(parse_volume_path(""), None);
         assert_eq!(find_lifeboat_volume("  ").unwrap(), None);
+    }
+
+    #[test]
+    fn merged_scripts() {
+        let g = "AB12";
+        let open = open_volume_script(g, Some(3));
+        assert!(open.starts_with("Set-Disk -Number 3 -IsOffline $false;"));
+        assert!(open.contains("-IsHidden $false"));
+        let open = open_volume_script(g, None);
+        assert!(!open.contains("Set-Disk"));
+        let close = close_volume_script(g, Some(3));
+        assert!(close.contains("-IsHidden $true") && close.contains("-IsOffline $true"));
+        assert!(!close_volume_script(g, None).contains("Set-Disk"));
     }
 
     #[test]
