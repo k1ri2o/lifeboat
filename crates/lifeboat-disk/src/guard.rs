@@ -12,6 +12,10 @@ pub enum Op {
     InternalShrink,
     SetOffline,
     SetOnline,
+    /// Grow the Lifeboat partition in place (any disk that holds it).
+    GrowLifeboat,
+    /// Delete the Lifeboat partition (any disk that holds it).
+    RemoveLifeboat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +30,8 @@ pub enum GuardError {
     AlreadyHasLifeboat(u32),
     /// External prepare on a disk that already has partitions.
     DiskNotEmpty(u32),
+    /// Grow or remove on a disk that has no Lifeboat partition.
+    NoLifeboat(u32),
 }
 
 impl std::fmt::Display for GuardError {
@@ -44,6 +50,7 @@ impl std::fmt::Display for GuardError {
                 write!(f, "disk {n} already has a Lifeboat partition")
             }
             GuardError::DiskNotEmpty(n) => write!(f, "disk {n} is not empty; refusing to wipe it"),
+            GuardError::NoLifeboat(n) => write!(f, "disk {n} has no Lifeboat partition"),
         }
     }
 }
@@ -54,6 +61,13 @@ impl std::error::Error for GuardError {}
 pub fn check(disk: &DiskInfo, op: Op, reuse: bool) -> Result<(), GuardError> {
     let protected = disk.is_boot || disk.is_system;
     match op {
+        Op::GrowLifeboat | Op::RemoveLifeboat => {
+            // Allowed on a boot disk too (the partition is found by GUID by the caller), but
+            // only when the disk really holds a Lifeboat partition.
+            if !disk.has_lifeboat_partition() {
+                return Err(GuardError::NoLifeboat(disk.number));
+            }
+        }
         Op::SetOffline | Op::SetOnline => {
             if protected {
                 return Err(GuardError::BootOrSystemDisk(disk.number));
@@ -189,6 +203,16 @@ mod tests {
             check(&d, Op::PrepareExternal, true),
             Err(GuardError::DiskNotEmpty(3))
         );
+    }
+
+    #[test]
+    fn grow_and_remove_need_a_lifeboat_partition() {
+        let with = disk(true, true, vec![user_part(), part(BASIC_DATA_TYPE_GUID)]);
+        let without = disk(false, false, vec![user_part()]);
+        for op in [Op::GrowLifeboat, Op::RemoveLifeboat] {
+            assert_eq!(check(&with, op, false), Ok(()));
+            assert_eq!(check(&without, op, false), Err(GuardError::NoLifeboat(3)));
+        }
     }
 
     #[test]

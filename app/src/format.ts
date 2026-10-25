@@ -286,3 +286,43 @@ export function deletesOnLine(dueSecs: number): string {
   const d = new Date(dueSecs * 1000);
   return Number.isNaN(d.getTime()) ? "Will be deleted soon" : `Deletes on ${longDate(d)}`;
 }
+
+const GIB = 1024 ** 3;
+
+/** How full the Lifeboat partition is, 0-100, or null when the used size is unknown. */
+export function usedPercent(used: number | null | undefined, total: number): number | null {
+  if (used == null || !(total > 0)) return null;
+  return Math.min(100, Math.max(0, Math.round((used / total) * 100)));
+}
+
+/** True above 85% full. */
+export function isNearlyFull(used: number | null | undefined, total: number): boolean {
+  const p = usedPercent(used, total);
+  return p != null && p > 85;
+}
+
+/** Whole GB that can be picked when growing: from 1 GB more than now up to the most that fits. */
+export function growRangeGb(total: number, max: number): { min: number; max: number } | null {
+  const min = Math.floor(total / GIB) + 1;
+  const top = Math.floor(max / GIB);
+  return top >= min ? { min, max: top } : null;
+}
+
+/** Turn the size typed in the "Make bigger" dialog into bytes, or say what is wrong. */
+export function parseGrowGb(text: string, total: number, max: number): { bytes: number } | { error: string } {
+  const range = growRangeGb(total, max);
+  if (!range) return { error: "There is no room to grow." };
+  const gb = Number(text.trim().replace(",", "."));
+  if (!text.trim() || !Number.isFinite(gb)) return { error: "Type the new size in GB, for example 200." };
+  if (gb < range.min) return { error: `Pick at least ${range.min} GB. Lifeboat can only grow, not shrink.` };
+  if (gb > range.max) return { error: `Pick at most ${range.max} GB. That is all the free space there is.` };
+  return { bytes: Math.round(gb * GIB) };
+}
+
+/** The word that must be typed to delete Lifeboat. */
+export const DELETE_WORD = "DELETE";
+
+/** True when the typed text is exactly the confirm word (case matters). */
+export function deleteWordOk(text: string): boolean {
+  return text === DELETE_WORD;
+}

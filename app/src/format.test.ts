@@ -210,3 +210,39 @@ describe("vault removal helpers", () => {
     expect(waitingDeletesTitle(1, 2)).toBe("1 backup and 2 vault items will be deleted");
   });
 });
+
+import { usedPercent, isNearlyFull, growRangeGb, parseGrowGb, deleteWordOk } from "./format";
+
+describe("Lifeboat size helpers", () => {
+  const G = 1024 ** 3;
+  it("works out how full it is", () => {
+    expect(usedPercent(50 * G, 100 * G)).toBe(50);
+    expect(usedPercent(null, 100 * G)).toBeNull();
+    expect(usedPercent(5, 0)).toBeNull();
+    expect(usedPercent(200 * G, 100 * G)).toBe(100);
+  });
+  it("warns only above 85%", () => {
+    expect(isNearlyFull(85 * G, 100 * G)).toBe(false);
+    expect(isNearlyFull(86 * G, 100 * G)).toBe(true);
+    expect(isNearlyFull(undefined, 100 * G)).toBe(false);
+  });
+  it("gives the range, or none when there is no room", () => {
+    expect(growRangeGb(100 * G, 300 * G)).toEqual({ min: 101, max: 300 });
+    expect(growRangeGb(100 * G, 100 * G)).toBeNull();
+  });
+  it("checks the typed size", () => {
+    expect(parseGrowGb("200", 100 * G, 300 * G)).toEqual({ bytes: 200 * G });
+    expect(parseGrowGb("2,5", 1 * G, 300 * G)).toEqual({ bytes: 2.5 * G });
+    expect("error" in parseGrowGb("50", 100 * G, 300 * G)).toBe(true);
+    expect("error" in parseGrowGb("301", 100 * G, 300 * G)).toBe(true);
+    expect("error" in parseGrowGb("abc", 100 * G, 300 * G)).toBe(true);
+    expect("error" in parseGrowGb("", 100 * G, 300 * G)).toBe(true);
+    expect("error" in parseGrowGb("200", 100 * G, 100 * G)).toBe(true);
+  });
+  it("needs the exact word DELETE", () => {
+    expect(deleteWordOk("DELETE")).toBe(true);
+    expect(deleteWordOk("delete")).toBe(false);
+    expect(deleteWordOk("DELETE ")).toBe(false);
+    expect(deleteWordOk("")).toBe(false);
+  });
+});

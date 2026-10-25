@@ -35,6 +35,16 @@ export interface Snapshot {
   /** Name of the PC that made this backup (empty when unknown). */
   hostname?: string;
 }
+export interface LifeboatSize {
+  total: number;
+  /** Space in use, when Windows can tell. */
+  used?: number | null;
+  /** The most the partition could be grown to. */
+  max_size: number;
+  can_grow: boolean;
+  /** Why it cannot grow (plain words), when it cannot. */
+  reason?: string;
+}
 export interface Partition {
   number: number;
   offset: number;
@@ -140,6 +150,13 @@ export const api = {
   vaultList: () => call<VaultItem[]>("vault_list"),
   vaultExtract: (password: string, paths: string[], target: string) =>
     call<string>("vault_extract", { password, paths, target }),
+  lifeboatSize: () => call<LifeboatSize>("lifeboat_size_info"),
+  /** Grow the Lifeboat partition. Resolves to its new size in bytes. */
+  resizeLifeboat: (password: string, newSize: number) =>
+    call<number>("resize_lifeboat", { password, newSize }),
+  /** Delete Lifeboat for good. `confirm` must be the word DELETE. */
+  removeLifeboat: (password: string, confirm: string) =>
+    call<void>("remove_lifeboat", { password, confirm }),
   openFolder: (path: string) => call<void>("open_folder", { path }),
   isAdmin: () => call<boolean>("is_admin"),
   relaunchAsAdmin: () => call<void>("relaunch_as_admin"),

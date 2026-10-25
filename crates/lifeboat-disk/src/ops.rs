@@ -263,7 +263,7 @@ pub fn hide_lifeboat_volume(partition_guid: &str) -> Result<()> {
     ps::run(&hide_script(partition_guid)).map(|_| ())
 }
 
-fn braced(guid: &str) -> String {
+pub(crate) fn braced(guid: &str) -> String {
     format!(
         "{{{}}}",
         guid.trim()

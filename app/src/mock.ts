@@ -25,6 +25,11 @@ export async function installMock(mode: string): Promise<void> {
   let vault: { path: string; dir: boolean; size: number; added: string; snapshot: string; removes_at?: number }[] = [
     { path: "C:\\Users\\Dad\\Documents\\Will.pdf", dir: false, size: 210 * 1024, added: iso(2000), snapshot: "v3" },
   ];
+  const G = 1024 ** 3;
+  // ?size=full shows the 85% warning, ?size=nogrow shows the "cannot grow" reason.
+  const sizeMode = new URLSearchParams(location.search).get("size");
+  let lbTotal = 100 * G;
+  const lbUsed = () => (sizeMode === "full" ? 92 * G : 31 * G);
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   mockIPC(async (cmd, args) => {
@@ -119,6 +124,21 @@ export async function installMock(mode: string): Promise<void> {
         if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
         await wait(500);
         return String(a.target);
+      case "lifeboat_size_info":
+        return sizeMode === "nogrow"
+          ? { total: lbTotal, used: lbUsed(), max_size: lbTotal, can_grow: false, reason: "Lifeboat can't grow here because the free space on this drive is in front of it, not behind it." }
+          : { total: lbTotal, used: lbUsed(), max_size: 300 * G, can_grow: true, reason: "" };
+      case "resize_lifeboat":
+        if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
+        await wait(800);
+        lbTotal = Number(a.newSize);
+        return lbTotal;
+      case "remove_lifeboat":
+        if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
+        if (a.confirm !== "DELETE") throw { kind: "service", message: "Type DELETE to confirm." };
+        await wait(800);
+        folders = [];
+        return null;
       case "open_folder":
         return null;
       case "is_admin":
