@@ -1092,4 +1092,5 @@ async function start() {
   void listen("service-down", refresh);
   void render();
 }
+window.addEventListener("unhandledrejection", (ev) => ev.preventDefault());
 void start();
