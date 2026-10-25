@@ -15,7 +15,8 @@ BusType=[string]$d.BusType; IsBoot=[bool]$d.IsBoot; IsSystem=[bool]$d.IsSystem; 
 Partitions=@(Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue | ForEach-Object { \
 [pscustomobject]@{ Number=[int]$_.PartitionNumber; Offset=[uint64]$_.Offset; Size=[uint64]$_.Size; \
 GptType=[string]$_.GptType; DriveLetter=[string]$_.DriveLetter; \
-IsHidden=[bool]$_.IsHidden; Guid=[string]$_.Guid } }) } }); \
+IsHidden=[bool]$_.IsHidden; NoDefaultDriveLetter=[bool]$_.NoDefaultDriveLetter; \
+Guid=[string]$_.Guid } }) } }); \
 ConvertTo-Json -Depth 4 -InputObject $r";
 
 #[derive(Deserialize)]
@@ -51,6 +52,8 @@ struct RawPart {
     #[serde(default)]
     is_hidden: bool,
     #[serde(default)]
+    no_default_drive_letter: bool,
+    #[serde(default)]
     guid: String,
 }
 
@@ -83,6 +86,7 @@ pub fn parse_disks(json: &str) -> Result<Vec<DiskInfo>> {
                     gpt_type: p.gpt_type,
                     drive_letter: p.drive_letter.chars().find(|c| c.is_ascii_alphabetic()),
                     is_hidden: p.is_hidden,
+                    no_default_letter: p.no_default_drive_letter,
                     guid: p.guid,
                 })
                 .collect(),
@@ -196,6 +200,9 @@ pub(crate) fn create_and_find(disk: u32, size: Option<u64>) -> Result<PreparedVo
 /// return its volume GUID path and partition GUID. Refuses boot/system disks and non-empty disks.
 pub fn prepare_external(disk_number: u32) -> Result<PreparedVolume> {
     let disk = disk_by_number(disk_number)?;
+    if let Some(v) = adopt(&disk)? {
+        return Ok(v);
+    }
     check(&disk, Op::PrepareExternal, false)?;
     if disk.partitions.is_empty() {
         // A disk that has been used before may still be GPT/MBR without partitions.
@@ -208,12 +215,52 @@ pub fn prepare_external(disk_number: u32) -> Result<PreparedVolume> {
     create_and_find(disk_number, None)
 }
 
-/// PowerShell that lists the access paths of the partition with unique GUID `partition_guid`.
+/// A Lifeboat partition left on `disk` by an earlier setup that failed after creating it (its
+/// marker file names it): use it instead of making a second one.
+pub(crate) fn adopt(disk: &DiskInfo) -> Result<Option<PreparedVolume>> {
+    for p in disk.partitions.iter().filter(|p| p.is_lifeboat()) {
+        if let Some(volume_path) = find_lifeboat_volume(&p.guid)? {
+            return Ok(Some(PreparedVolume {
+                volume_path,
+                partition_guid: p.guid.clone(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// PowerShell that makes the partition with unique GUID `partition_guid` reachable and lists its
+/// access paths. A hidden partition (GPT bit 62) has no volume path, so the script clears that
+/// bit (the no-drive-letter bit stays: no letter appears in Explorer) and waits up to 10 s for
+/// Windows to mount the volume. [`hide_lifeboat_volume`] sets the bit again.
 pub fn find_script(partition_guid: &str) -> String {
     format!(
-        "Get-Partition | Where-Object {{ $_.Guid -eq {} }} | ForEach-Object {{ $_.AccessPaths }}",
+        "$p = Get-Partition | Where-Object {{ $_.Guid -eq {} }} | Select-Object -First 1; \
+         if ($p) {{ if ($p.IsHidden) {{ $p | Set-Partition -IsHidden $false }}; \
+         for ($i = 0; $i -lt 40; $i++) {{ \
+         $a = (Get-Partition -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber).AccessPaths; \
+         if ($a -match 'Volume') {{ break }}; \
+         if ($i -eq 8) {{ Update-Disk -Number $p.DiskNumber }}; \
+         Start-Sleep -Milliseconds 250 }}; $a }}",
         quote(&braced(partition_guid))
     )
+}
+
+/// PowerShell that hides the partition with unique GUID `partition_guid` again (bits 62 and 63).
+pub fn hide_script(partition_guid: &str) -> String {
+    format!(
+        "Get-Partition | Where-Object {{ $_.Guid -eq {} }} | Set-Partition -IsHidden $true -NoDefaultDriveLetter $true",
+        quote(&braced(partition_guid))
+    )
+}
+
+/// Hide the Lifeboat partition so no program sees its volume. Call when a backup, restore or
+/// setup is done. No-op for an empty GUID or when the partition is not there.
+pub fn hide_lifeboat_volume(partition_guid: &str) -> Result<()> {
+    if partition_guid.trim().is_empty() {
+        return Ok(());
+    }
+    ps::run(&hide_script(partition_guid)).map(|_| ())
 }
 
 fn braced(guid: &str) -> String {
@@ -332,6 +379,11 @@ mod tests {
             "{s}"
         );
         assert!(!s.contains("GptType"));
+        assert!(s.contains("Set-Partition -IsHidden $false"), "{s}");
+        let h = hide_script("3F2A9C10-1B2C-4D3E-8F90-0123456789AB");
+        assert!(h.contains("$_.Guid -eq '{3f2a9c10-1b2c-4d3e-8f90-0123456789ab}'"));
+        assert!(h.contains("-IsHidden $true -NoDefaultDriveLetter $true"));
+        assert!(hide_lifeboat_volume("  ").is_ok());
         let out = "E:\\\r\n\\\\?\\Volume{aaaa}\\\r\n";
         assert_eq!(
             parse_volume_path(out).as_deref(),

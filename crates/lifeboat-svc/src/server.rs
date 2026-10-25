@@ -307,10 +307,13 @@ fn init_repo(st: &State, password: String, folders: Vec<String>) -> Response {
 struct Located {
     path: String,
     disk: Option<u32>,
+    guid: String,
 }
 
 impl Drop for Located {
     fn drop(&mut self) {
+        // Hide the partition again (it is unhidden only while in use).
+        let _ = lifeboat_disk::hide_lifeboat_volume(&self.guid);
         if let Some(d) = self.disk {
             let _ = lifeboat_disk::set_disk_offline(d);
         }
@@ -326,6 +329,7 @@ fn locate_volume(cfg: &Config) -> Result<Located, String> {
     let mut located = Located {
         path: String::new(),
         disk: None,
+        guid: guid.clone(),
     };
     if !shared {
         lifeboat_disk::set_disk_online(disk).map_err(|e| e.to_string())?;
@@ -532,6 +536,7 @@ fn prepare(disk: u32, mode: PrepareMode) -> lifeboat_disk::Result<lifeboat_disk:
         }
     };
     lifeboat_disk::lock_down(&volume.volume_path)?;
+    let _ = lifeboat_disk::hide_lifeboat_volume(&volume.partition_guid);
     Ok(volume)
 }
 

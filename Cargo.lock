@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-app"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "lifeboat-core",
  "serde",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -2021,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-detect"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -2030,7 +2030,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-disk"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "lifeboat-core",
  "serde",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-engine"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -2048,7 +2048,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-svc"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "getrandom 0.2.17",
  "lifeboat-core",

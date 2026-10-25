@@ -41,6 +41,8 @@ pub trait Env {
     /// Bring the disk online and confirm the Lifeboat volume.
     fn mount(&self) -> Result<Mount, String>;
     fn offline(&self, disk: u32);
+    /// Hide the Lifeboat partition again after use. Default: nothing (tests).
+    fn hide(&self) {}
     /// Files changed since `since` in the backed-up folders, canary hits included.
     fn scan(&self, since: u64) -> Result<ChangeSet, String>;
     fn backup(&self) -> Result<String, String>;
@@ -76,6 +78,7 @@ struct OfflineGuard<'a> {
 
 impl Drop for OfflineGuard<'_> {
     fn drop(&mut self) {
+        self.env.hide();
         if let Some(d) = self.disk {
             self.env.offline(d);
         }
@@ -388,12 +391,14 @@ impl Env for RealEnv {
         match lifeboat_disk::find_lifeboat_volume(guid) {
             Ok(Some(_)) => Ok(m),
             Ok(None) => {
+                self.hide();
                 if let Some(d) = m.disk {
                     self.offline(d);
                 }
                 Err("backup volume not found or marker mismatch".into())
             }
             Err(e) => {
+                self.hide();
                 if let Some(d) = m.disk {
                     self.offline(d);
                 }
@@ -404,6 +409,10 @@ impl Env for RealEnv {
 
     fn offline(&self, disk: u32) {
         let _ = lifeboat_disk::set_disk_offline(disk);
+    }
+
+    fn hide(&self) {
+        let _ = lifeboat_disk::hide_lifeboat_volume(&self.cfg.partition_guid);
     }
 
     fn scan(&self, since: u64) -> Result<ChangeSet, String> {
