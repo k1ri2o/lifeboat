@@ -54,17 +54,23 @@ pub struct PartitionInfo {
     /// Hidden flag (GPT attribute bit 62).
     #[serde(default)]
     pub is_hidden: bool,
+    /// No-default-drive-letter flag (GPT attribute bit 63).
+    #[serde(default)]
+    pub no_default_letter: bool,
     /// Unique partition GUID, empty when unknown.
     #[serde(default)]
     pub guid: String,
 }
 
 impl PartitionInfo {
-    /// Looks like a Lifeboat partition: hidden basic-data partition without a drive letter.
+    /// Looks like a Lifeboat partition: hidden (or, while in use, no-drive-letter) basic-data
+    /// partition without a drive letter.
     /// This is only a heuristic for the guard ("do not wipe this disk"); the real identity is
     /// [`PartitionInfo::has_guid`].
     pub fn is_lifeboat(&self) -> bool {
-        is_basic_data_type(&self.gpt_type) && self.is_hidden && self.drive_letter.is_none()
+        is_basic_data_type(&self.gpt_type)
+            && (self.is_hidden || self.no_default_letter)
+            && self.drive_letter.is_none()
     }
 
     /// Is this the partition with the saved unique GUID?
@@ -144,6 +150,7 @@ mod tests {
             gpt_type: BASIC_DATA_TYPE_GUID.into(),
             drive_letter: letter,
             is_hidden: hidden,
+            no_default_letter: hidden,
             guid: guid.into(),
         }
     }
@@ -158,6 +165,12 @@ mod tests {
         assert!(!part(false, None, "x").is_lifeboat());
         assert!(!part(true, Some('E'), "x").is_lifeboat());
         assert!(!part(false, None, "").has_guid(""));
+        // Unhidden while a backup runs: still Lifeboat thanks to the no-drive-letter bit.
+        let in_use = PartitionInfo {
+            no_default_letter: true,
+            ..part(false, None, "{L}")
+        };
+        assert!(in_use.is_lifeboat());
     }
 
     #[test]

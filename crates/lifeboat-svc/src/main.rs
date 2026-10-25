@@ -65,6 +65,13 @@ fn run_console() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tx.send(true);
         });
         let st = Arc::new(server::State::load_default()?);
+        // Hide the partition at start, in case a crash left it unhidden.
+        let guid = st
+            .cfg
+            .lock()
+            .map(|c| c.partition_guid.clone())
+            .unwrap_or_default();
+        let _ = lifeboat_disk::hide_lifeboat_volume(&guid);
         tokio::spawn(scheduler::run(st.clone(), rx.clone()));
         server::serve_default(st, rx).await
     })?;
@@ -103,6 +110,13 @@ fn run_service() -> windows_service::Result<()> {
     ))?;
     let _ = runtime().block_on(async {
         let st = Arc::new(server::State::load_default()?);
+        // Hide the partition at start, in case a crash left it unhidden.
+        let guid = st
+            .cfg
+            .lock()
+            .map(|c| c.partition_guid.clone())
+            .unwrap_or_default();
+        let _ = lifeboat_disk::hide_lifeboat_volume(&guid);
         tokio::spawn(scheduler::run(st.clone(), rx.clone()));
         server::serve_default(st, rx).await
     });

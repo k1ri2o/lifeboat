@@ -102,13 +102,33 @@ fn full_cycle_on_vhdx() {
             .drive_letter,
         None
     );
-    // Second prepare is refused by the guard.
-    assert!(matches!(prepare_external(n), Err(Error::Guard(_))));
+    // Hide, then find again: the volume comes back (unhidden for use, still no letter).
+    hide_lifeboat_volume(&prepared.partition_guid).expect("hide");
+    assert_eq!(
+        find_lifeboat_volume(&prepared.partition_guid)
+            .unwrap()
+            .as_deref(),
+        Some(vol.as_str())
+    );
+    // A second prepare adopts the existing partition instead of making another.
+    let again = prepare_external(n).expect("adopt");
+    assert_eq!(again.partition_guid, prepared.partition_guid);
 
     lock_down(&vol).expect("lock_down");
-    let acl = acl::read_acl(&vol).unwrap();
-    assert!(acl.contains("SYSTEM"), "{acl}");
-    assert!(!acl.contains(r"BUILTIN\Users"), "{acl}");
+    // Owner is SYSTEM and Administrators are removed, so even this admin test can no longer
+    // read the volume's ACL: the lock-down holds against an elevated user.
+    match acl::read_acl(&vol) {
+        Ok(acl) => {
+            assert!(acl.contains("SYSTEM"), "{acl}");
+            assert!(!acl.contains(r"BUILTIN\Users"), "{acl}");
+            assert!(!acl.contains(r"BUILTIN\Administrators"), "{acl}");
+        }
+        Err(e) => assert!(format!("{e:?}").contains("denied"), "{e:?}"),
+    }
+    assert!(
+        std::fs::read_dir(&vol).is_err(),
+        "an administrator must not be able to list the locked volume"
+    );
 
     set_disk_offline(n).expect("offline");
     set_disk_online(n).expect("online");

@@ -29,7 +29,10 @@ pub const SERVICE_ACCOUNT: &str = r"NT SERVICE\lifeboat-svc";
 pub fn lock_down_args(root: &str, service_account: &str) -> Vec<Vec<String>> {
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     vec![
-        // Grant first, so we never lock ourselves out mid-way, then cut inheritance.
+        // Owner first, while Administrators still have full control (once they are removed,
+        // setting the owner is refused). Then grant, so we never lock ourselves out mid-way,
+        // then cut inheritance.
+        vec![root.to_string(), "/setowner".into(), SYSTEM.into()],
         vec![
             root.to_string(),
             "/grant:r".into(),
@@ -46,7 +49,6 @@ pub fn lock_down_args(root: &str, service_account: &str) -> Vec<Vec<String>> {
             v.extend(s(&[USERS, EVERYONE, AUTH_USERS, ADMINS]).into_iter());
             v
         },
-        vec![root.to_string(), "/setowner".into(), SYSTEM.into()],
     ]
 }
 
@@ -59,13 +61,23 @@ pub fn lock_down(volume_path: &str) -> Result<()> {
         )));
     }
     for args in lock_down_args(volume_path, SERVICE_ACCOUNT) {
-        let out = Command::new("icacls.exe").args(&args).output()?;
-        if !out.status.success() {
-            return Err(Error::Command(format!(
-                "icacls {}: {}",
-                args[1],
-                String::from_utf8_lossy(&out.stdout).trim()
-            )));
+        // A volume Windows has just mounted (after unhiding) can refuse for a moment: retry.
+        let mut tries = 0;
+        loop {
+            let out = Command::new("icacls.exe").args(&args).output()?;
+            if out.status.success() {
+                break;
+            }
+            tries += 1;
+            if tries >= 5 {
+                return Err(Error::Command(format!(
+                    "icacls {}: {} {}",
+                    args[1],
+                    String::from_utf8_lossy(&out.stdout).trim(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
     Ok(())
@@ -84,8 +96,10 @@ mod tests {
     fn acl_plan() {
         let a = lock_down_args(r"\\?\Volume{x}\", SERVICE_ACCOUNT);
         assert_eq!(a.len(), 4);
+        assert_eq!(a[0][2], "*S-1-5-18");
+        assert_eq!(a[0][1], "/setowner");
         assert_eq!(
-            a[0],
+            a[1],
             vec![
                 r"\\?\Volume{x}\",
                 "/grant:r",
@@ -93,11 +107,10 @@ mod tests {
                 r"NT SERVICE\lifeboat-svc:(OI)(CI)F"
             ]
         );
-        assert_eq!(a[1][1], "/inheritance:r");
+        assert_eq!(a[2][1], "/inheritance:r");
         for sid in ["*S-1-5-32-545", "*S-1-1-0", "*S-1-5-11", "*S-1-5-32-544"] {
-            assert!(a[2].contains(&sid.to_string()));
+            assert!(a[3].contains(&sid.to_string()));
         }
-        assert_eq!(a[3][2], "*S-1-5-18");
         // Only SYSTEM and the service are ever granted anything.
         let grants: Vec<_> = a.iter().flatten().filter(|x| x.contains(":(")).collect();
         assert_eq!(grants.len(), 2);

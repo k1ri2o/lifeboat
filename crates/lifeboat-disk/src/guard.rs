@@ -58,7 +58,9 @@ pub fn check(disk: &DiskInfo, op: Op, reuse: bool) -> Result<(), GuardError> {
             if protected {
                 return Err(GuardError::BootOrSystemDisk(disk.number));
             }
-            if disk.is_shared() {
+            // Only going offline can make other drives vanish. Bringing a disk online is
+            // always safe, and an offline disk reports its partitions unreliably.
+            if op == Op::SetOffline && disk.is_shared() {
                 return Err(GuardError::SharedDisk(disk.number));
             }
         }
@@ -114,6 +116,7 @@ mod tests {
             gpt_type: guid.into(),
             drive_letter: None,
             is_hidden: true,
+            no_default_letter: true,
             guid: "{g}".into(),
         }
     }
@@ -123,6 +126,7 @@ mod tests {
         PartitionInfo {
             drive_letter: Some('E'),
             is_hidden: false,
+            no_default_letter: false,
             ..part(BASIC_DATA_TYPE_GUID)
         }
     }
@@ -151,10 +155,7 @@ mod tests {
             check(&second, Op::SetOffline, true),
             Err(GuardError::SharedDisk(3))
         );
-        assert_eq!(
-            check(&second, Op::SetOnline, true),
-            Err(GuardError::SharedDisk(3))
-        );
+        assert_eq!(check(&second, Op::SetOnline, true), Ok(()));
         let with_lb = disk(false, false, vec![user_part(), part(BASIC_DATA_TYPE_GUID)]);
         assert!(check(&with_lb, Op::InternalShrink, false).is_err());
         assert!(check(&with_lb, Op::SetOffline, true).is_err());
