@@ -102,6 +102,6 @@ export const api = {
   /** Removing a folder needs the Lifeboat password. */
   removeFolder: (folder: string, password: string) =>
     call<string[]>("remove_folder", { folder, password }),
-  initRepo: (password: string, folders: string[]) =>
-    call<string>("init_repo", { password, folders }),
+  initRepo: (password: string, folders: string[], fresh = false) =>
+    call<string>("init_repo", { password, folders, fresh }),
 };

@@ -61,7 +61,14 @@ export function icon(name: IconName, size = 20): HTMLElement {
 export function button(label: string, opts: { cls?: string; icon?: IconName; onclick?: (e: Event) => void } = {}): HTMLButtonElement {
   const attrs: Attrs = { type: "button", class: `btn ${opts.cls ?? ""}`.trim() };
   if (opts.onclick) attrs.onclick = opts.onclick;
-  return h("button", attrs, opts.icon ? icon(opts.icon, 18) : null, h("span", {}, label)) as HTMLButtonElement;
+  return h("button", attrs, opts.icon ? icon(opts.icon, 18) : null, h("span", { class: "label" }, label)) as HTMLButtonElement;
+}
+
+/** Change a button's text, keeping its icon. */
+export function setLabel(btn: HTMLElement, label: string) {
+  const el = btn.querySelector(".label");
+  if (el) el.textContent = label;
+  else btn.textContent = label;
 }
 
 /** A small spinning wheel with text, for any wait on the service. */

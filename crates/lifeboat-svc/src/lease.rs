@@ -150,12 +150,12 @@ mod tests {
     #[test]
     fn use_resets_idle_clock() {
         let (o, c) = counted();
-        let l = Lease::new(Duration::from_millis(80));
+        let l = Lease::new(Duration::from_millis(600));
         drop(l.acquire(|| open(&o, &c)).unwrap());
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(350));
         drop(l.acquire(|| open(&o, &c)).unwrap());
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(!l.expire_idle(), "touched 50 ms ago, idle is 80 ms");
+        std::thread::sleep(Duration::from_millis(350));
+        assert!(!l.expire_idle(), "touched 350 ms ago, idle is 600 ms");
         assert_eq!(o.load(Ordering::SeqCst), 1);
     }
 

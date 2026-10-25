@@ -229,13 +229,17 @@ async fn remove_folder(folder: String, password: String) -> Result<Vec<String>, 
 
 /// Second setup step: create the repository. Returns the recovery key, to be shown once.
 #[tauri::command]
-async fn init_repo(password: String, folders: Vec<String>) -> Result<String, ApiError> {
+async fn init_repo(
+    password: String,
+    folders: Vec<String>,
+    fresh: Option<bool>,
+) -> Result<String, ApiError> {
     if password.len() < 8 {
         return Err(ApiError::other(
             "Please choose a password with at least 8 characters.",
         ));
     }
-    blocking(move || pipe::init_repo(PIPE_NAME, &password, folders)).await
+    blocking(move || pipe::init_repo(PIPE_NAME, &password, folders, fresh.unwrap_or(false))).await
 }
 
 fn show_window(app: &AppHandle) {
