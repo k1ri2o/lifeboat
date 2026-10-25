@@ -64,14 +64,15 @@ export async function installMock(mode: string): Promise<void> {
       case "list_files": {
         await wait(400);
         const base = a.path ? String(a.path).replace(/[\/]+$/, "") : "";
+        // Same shape as the service: restic paths (/C/Users/Dad/Documents), display name in Windows form for top folders.
         const e = (name: string, dir: boolean, size: number) => ({
-          path: base ? `${base}\${name}` : name,
+          path: `${base}/${name}`,
           name,
           dir,
           size,
           mtime: iso(300),
         });
-        if (!base) return folders.map((f) => ({ path: f, name: f, dir: true, size: 0, mtime: iso(300) }));
+        if (!base) return folders.map((f) => ({ path: "/" + f.replace(":", "").split("\\").join("/"), name: f, dir: true, size: 0, mtime: iso(300) }));
         return [e("Holidays", true, 0), e("Letter to bank.docx", false, 48 * 1024), e("Photo 001.jpg", false, 3.2 * 1024 * 1024)];
       }
       case "vault_add":

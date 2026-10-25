@@ -353,8 +353,12 @@ fn set_folders(
     if removes {
         // Malware must not be able to silently stop backups: removing needs the password.
         let pw = password.unwrap_or_default();
-        if let Err(r) = password_gate(&cfg, limiter, &pw) {
-            return refused(r);
+        let checked = with_volume(st, &cfg, |c, _| match password_gate(c, limiter, &pw) {
+            Ok(()) => Response::Done,
+            Err(r) => refused(r),
+        });
+        if !matches!(checked, Response::Done) {
+            return checked;
         }
     }
     let added: Vec<PathBuf> = new
@@ -847,8 +851,14 @@ pub fn handle_line(
             init_repo(st, password, folders)
         }
         Request::DeleteSnapshots { password, ids } => {
-            if let Err(r) = password_gate(&cfg, limiter, &password) {
-                return refused(r);
+            let checked = with_volume(st, &cfg, |c, _| {
+                match password_gate(c, limiter, &password) {
+                    Ok(()) => Response::Done,
+                    Err(r) => refused(r),
+                }
+            });
+            if !matches!(checked, Response::Done) {
+                return checked;
             }
             let due = now_unix() + DELETE_DELAY_SECS;
             let r = st.update(|c| {
@@ -861,16 +871,28 @@ pub fn handle_line(
             r.map(|_| Response::Done).unwrap_or_else(err)
         }
         Request::CancelDelete { password } => {
-            if let Err(r) = password_gate(&cfg, limiter, &password) {
-                return refused(r);
+            let checked = with_volume(st, &cfg, |c, _| {
+                match password_gate(c, limiter, &password) {
+                    Ok(()) => Response::Done,
+                    Err(r) => refused(r),
+                }
+            });
+            if !matches!(checked, Response::Done) {
+                return checked;
             }
             st.update(|c| c.pending_deletes.clear())
                 .map(|_| Response::Done)
                 .unwrap_or_else(err)
         }
         Request::Unfreeze { password } => {
-            if let Err(r) = password_gate(&cfg, limiter, &password) {
-                return refused(r);
+            let checked = with_volume(st, &cfg, |c, _| {
+                match password_gate(c, limiter, &password) {
+                    Ok(()) => Response::Done,
+                    Err(r) => refused(r),
+                }
+            });
+            if !matches!(checked, Response::Done) {
+                return checked;
             }
             let mut f = FreezeState::load(&st.paths.freeze).unwrap_or_default();
             f.clear();
@@ -1238,6 +1260,161 @@ mod tests {
         delete_original(&f).unwrap();
         assert!(!f.exists());
         delete_original(&f).unwrap();
+    }
+
+    /// Real restic through `handle_line`: list, partial restore into a new folder, vault
+    /// add / list / extract, and the password gates. Skipped when vendor/restic is missing.
+    #[test]
+    fn real_restic_browse_restore_and_vault_flows() {
+        let restic_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor/restic");
+        let restic = restic_dir.join("restic.exe");
+        if !restic.exists() {
+            eprintln!("SKIPPED: vendor/restic/restic.exe missing; run scripts/fetch-restic.ps1");
+            return;
+        }
+        // The service finds restic next to its exe or on PATH; tests use PATH.
+        let mut path = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs = vec![restic_dir.canonicalize().unwrap()];
+        dirs.extend(std::env::split_paths(&path));
+        path = std::env::join_paths(dirs).unwrap();
+        std::env::set_var("PATH", path);
+
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("docs");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src.join("a [1].txt"), b"bracket").unwrap();
+        std::fs::write(src.join("sub").join("b.txt"), b"beta").unwrap();
+        let repo = t.path().join("repo");
+        let e = Engine::new(restic, repo.clone(), "pw", vec![src.clone()]);
+        e.init().unwrap();
+        let snap_id = e.backup().unwrap();
+
+        let cfg = Config {
+            repo,
+            password: "pw".into(),
+            folders: vec![src.clone()],
+            ..Config::default()
+        };
+        let state_dir = t.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let st = state_with(cfg, &state_dir);
+        FreezeState::default().save(&st.paths.freeze).unwrap();
+        let send = |r: Request| {
+            let line = serde_json::to_string(&r).unwrap();
+            call(&line, &st, false)
+        };
+
+        // Top level: restic path, Windows display name.
+        let Response::Files { entries } = send(Request::ListFiles {
+            snapshot: snap_id.clone(),
+            path: None,
+        }) else {
+            panic!("expected files")
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].path.starts_with('/') && !entries[0].path.contains('\\'));
+        assert_eq!(
+            entries[0].name.to_lowercase(),
+            src.to_string_lossy().to_lowercase()
+        );
+        // One level down, using the path exactly as returned.
+        let Response::Files { entries: kids } = send(Request::ListFiles {
+            snapshot: snap_id.clone(),
+            path: Some(entries[0].path.clone()),
+        }) else {
+            panic!("expected files")
+        };
+        let mut names: Vec<_> = kids.iter().map(|k| k.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["a [1].txt", "a.txt", "sub"]);
+        let bracket = kids.iter().find(|k| k.name == "a [1].txt").unwrap();
+        let sub = kids.iter().find(|k| k.name == "sub").unwrap();
+        assert!(sub.dir && sub.path.ends_with("/sub"));
+
+        // Wrong password is refused and restores nothing.
+        let out = t.path().join("new folder").join("restored");
+        let r = send(Request::Restore {
+            password: "nope".into(),
+            snapshot: snap_id.clone(),
+            target: out.to_string_lossy().into(),
+            paths: vec![bracket.path.clone()],
+        });
+        assert!(matches!(r, Response::Error { .. }));
+        assert!(!out.exists());
+
+        // Partial restore into a target folder that does not exist yet.
+        let r = send(Request::Restore {
+            password: "pw".into(),
+            snapshot: snap_id.clone(),
+            target: out.to_string_lossy().into(),
+            paths: vec![bracket.path.clone(), sub.path.clone()],
+        });
+        assert!(matches!(r, Response::Restored { .. }), "{r:?}");
+        assert_eq!(std::fs::read(out.join("a [1].txt")).unwrap(), b"bracket");
+        assert_eq!(
+            std::fs::read(out.join("sub").join("b.txt")).unwrap(),
+            b"beta"
+        );
+        assert!(!out.join("a.txt").exists());
+        // A second restore into the now non-empty folder is refused.
+        let r = send(Request::Restore {
+            password: "pw".into(),
+            snapshot: snap_id.clone(),
+            target: out.to_string_lossy().into(),
+            paths: vec![],
+        });
+        assert!(matches!(r, Response::Error { .. }));
+
+        // Vault: move a folder in, see it listed, take it out again.
+        let vault_dir = t.path().join("secret");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        std::fs::write(vault_dir.join("s.txt"), b"shh").unwrap();
+        let vp = vault_dir.to_string_lossy().to_string();
+        let r = send(Request::VaultAdd {
+            password: "pw".into(),
+            paths: vec![vp.clone()],
+        });
+        assert!(matches!(r, Response::VaultAdded { moved: 1, .. }), "{r:?}");
+        assert!(
+            !vault_dir.exists(),
+            "original must be deleted after the check"
+        );
+        let Response::Vault { items } = send(Request::VaultList) else {
+            panic!("expected vault")
+        };
+        assert_eq!(items.len(), 1);
+        assert!(items[0].dir && items[0].path.eq_ignore_ascii_case(&vp));
+        let back = t.path().join("vault out");
+        let r = send(Request::VaultExtract {
+            password: "pw".into(),
+            paths: vec![items[0].path.clone()],
+            target: back.to_string_lossy().into(),
+        });
+        assert!(matches!(r, Response::Restored { .. }), "{r:?}");
+        assert_eq!(
+            std::fs::read(back.join("secret").join("s.txt")).unwrap(),
+            b"shh"
+        );
+        // Vault snapshots stay out of the normal list.
+        let Response::Snapshots { snapshots } = send(Request::ListSnapshots) else {
+            panic!("expected snapshots")
+        };
+        assert_eq!(snapshots.len(), 1);
+
+        // The password gates open the real repo: right password passes, wrong one fails.
+        assert!(matches!(
+            send(Request::CancelDelete {
+                password: "pw".into()
+            }),
+            Response::Done
+        ));
+        assert!(matches!(
+            send(Request::CancelDelete {
+                password: "bad".into()
+            }),
+            Response::Error { .. }
+        ));
     }
 
     #[test]
