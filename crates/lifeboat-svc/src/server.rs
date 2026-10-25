@@ -1,5 +1,7 @@
 //! Named-pipe server speaking the JSON-lines protocol.
 
+use crate::cache::{Caches, MAX_TREE_NODES};
+use crate::ctx::Ctx;
 use crate::cycle::{self, Env, Outcome, Paths, RealEnv};
 use crate::security::{
     gate, pipe_client_is_admin, production_sddl, require_admin, Descriptor, RateLimiter, Refusal,
@@ -31,6 +33,8 @@ pub struct State {
     /// Only one backup cycle at a time (timer, watcher and the Backup request).
     pub cycle_lock: Mutex<()>,
     pub prepare: PrepareFn,
+    /// Volume lease, result caches and repository lock.
+    pub ctx: Arc<Ctx>,
 }
 
 impl State {
@@ -40,6 +44,7 @@ impl State {
             store,
             paths,
             cycle_lock: Mutex::new(()),
+            ctx: Arc::new(Ctx::new()),
             prepare: Box::new(|disk, mode| {
                 prepare(disk, mode)
                     .map(|v| (v.volume_path, v.partition_guid))
@@ -85,6 +90,8 @@ impl State {
         let env = RealEnv {
             cfg: before.clone(),
             canaries: self.paths.canaries.clone(),
+            ctx: self.ctx.clone(),
+            held: Mutex::new(None),
         };
         self.cycle_with(&env, before)
     }
@@ -267,7 +274,11 @@ fn init_repo(st: &State, password: String, folders: Vec<String>) -> Response {
     }
     let folders: Vec<PathBuf> = folders.into_iter().map(PathBuf::from).collect();
     // Find the volume, bringing the disk online for the duration.
-    let volume = match locate_volume(&cfg) {
+    if cfg.partition_guid.is_empty() {
+        return err("no backup disk is prepared yet");
+    }
+    let _w = st.ctx.write();
+    let volume = match st.ctx.volume(&cfg.partition_guid) {
         Ok(v) => v,
         Err(e) => return err(e),
     };
@@ -291,7 +302,8 @@ fn init_repo(st: &State, password: String, folders: Vec<String>) -> Response {
     if let Err(e) = cycle::plant_canaries(&folders, &st.paths.canaries) {
         return err(e);
     }
-    drop(volume);
+    drop(volume); // the lease keeps it for a few more seconds
+    st.ctx.caches.invalidate_all();
     let saved = st.update(|c| {
         c.repo = repo;
         c.password = password;
@@ -301,44 +313,6 @@ fn init_repo(st: &State, password: String, folders: Vec<String>) -> Response {
         Ok(()) => Response::RepoInitialized { recovery_key: key },
         Err(e) => err(e),
     }
-}
-
-/// The mounted Lifeboat volume; takes the disk offline again when dropped.
-struct Located {
-    path: String,
-    disk: Option<u32>,
-    guid: String,
-}
-
-impl Drop for Located {
-    fn drop(&mut self) {
-        // Hide the partition again (it is unhidden only while in use).
-        let _ = lifeboat_disk::hide_lifeboat_volume(&self.guid);
-        if let Some(d) = self.disk {
-            let _ = lifeboat_disk::set_disk_offline(d);
-        }
-    }
-}
-
-fn locate_volume(cfg: &Config) -> Result<Located, String> {
-    let guid = &cfg.partition_guid;
-    if guid.is_empty() {
-        return Err("no backup disk is prepared yet".into());
-    }
-    let (disk, shared) = cycle::disk_of(guid).ok_or("backup disk not found")?;
-    let mut located = Located {
-        path: String::new(),
-        disk: None,
-        guid: guid.clone(),
-    };
-    if !shared {
-        lifeboat_disk::set_disk_online(disk).map_err(|e| e.to_string())?;
-        located.disk = Some(disk);
-    }
-    located.path = lifeboat_disk::find_lifeboat_volume(guid)
-        .map_err(|e| e.to_string())?
-        .ok_or("backup volume not found or marker mismatch")?;
-    Ok(located)
 }
 
 fn set_folders(
@@ -381,10 +355,12 @@ fn set_folders(
 }
 
 /// Run `f` with the backup repository reachable. In production the partition is hidden at
-/// rest, so it is unhidden and mounted for the whole call (the `Located` guard re-hides it
-/// when `f` returns). A backup cycle never runs at the same time. `f` gets a config whose
-/// `repo` is the reachable path and, when a real volume is mounted, that volume's path.
-/// Without a `partition_guid` (test mode) the repo is a plain folder and nothing is mounted.
+/// rest; the volume lease unhides it on first use and re-hides it after 30 s idle, so a burst
+/// of requests costs one PowerShell run. The volume is reached by its GUID path (no drive
+/// letter, so it is not visible in Explorer). Reads share the repository lock with each other
+/// and with a running backup; only forget / prune / check exclude them. `f` gets a config
+/// whose `repo` is the reachable path and, with a real volume, that volume's path.
+/// Without a `partition_guid` (test mode) the repo is a plain folder and nothing is leased.
 fn with_volume(
     st: &State,
     cfg: &Config,
@@ -393,11 +369,11 @@ fn with_volume(
     if cfg.repo.as_os_str().is_empty() {
         return err("backup repository is not configured");
     }
-    let _one = st.cycle_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _r = st.ctx.read();
     if cfg.partition_guid.is_empty() {
         return f(cfg, None);
     }
-    let volume = match locate_volume(cfg) {
+    let volume = match st.ctx.volume(&cfg.partition_guid) {
         Ok(v) => v,
         Err(e) => return err(e),
     };
@@ -418,10 +394,14 @@ fn is_vault(s: &Snapshot) -> bool {
 }
 
 /// Vault snapshots, newest first.
-fn vault_snapshots(e: &Engine) -> Result<Vec<Snapshot>, String> {
-    let mut v: Vec<Snapshot> = e
-        .snapshots()
-        .map_err(|e| e.to_string())?
+fn all_snapshots(e: &Engine, c: &Config, caches: &Caches) -> Result<Vec<Snapshot>, String> {
+    caches.snapshots(&c.repo.to_string_lossy(), || {
+        e.snapshots().map_err(|e| e.to_string())
+    })
+}
+
+fn vault_snapshots(e: &Engine, c: &Config, caches: &Caches) -> Result<Vec<Snapshot>, String> {
+    let mut v: Vec<Snapshot> = all_snapshots(e, c, caches)?
         .into_iter()
         .filter(is_vault)
         .collect();
@@ -430,11 +410,11 @@ fn vault_snapshots(e: &Engine) -> Result<Vec<Snapshot>, String> {
 }
 
 /// `latest` (the newest normal backup) or an id / unique id prefix.
-fn resolve_snapshot(e: &Engine, id: &str) -> Result<Snapshot, String> {
+fn resolve_snapshot(e: &Engine, c: &Config, caches: &Caches, id: &str) -> Result<Snapshot, String> {
     if !lifeboat_engine::valid_snapshot_id(id) {
         return Err("bad snapshot id".into());
     }
-    let mut all = e.snapshots().map_err(|e| e.to_string())?;
+    let mut all = all_snapshots(e, c, caches)?;
     if id == "latest" {
         all.retain(|s| !is_vault(s));
         all.sort_by(|a, b| a.time.cmp(&b.time));
@@ -469,9 +449,9 @@ fn top_paths(s: &Snapshot) -> Vec<String> {
         .collect()
 }
 
-fn list_snapshots(c: &Config) -> Result<Response, String> {
+fn list_snapshots(c: &Config, caches: &Caches) -> Result<Response, String> {
     let e = engine(c)?;
-    let v = e.snapshots().map_err(|e| e.to_string())?;
+    let v = all_snapshots(&e, c, caches)?;
     Ok(Response::Snapshots {
         snapshots: v
             .into_iter()
@@ -486,9 +466,14 @@ fn list_snapshots(c: &Config) -> Result<Response, String> {
     })
 }
 
-fn list_files(c: &Config, snapshot: &str, path: Option<&str>) -> Result<Response, String> {
+fn list_files(
+    c: &Config,
+    caches: &Caches,
+    snapshot: &str,
+    path: Option<&str>,
+) -> Result<Response, String> {
     let e = engine(c)?;
-    let snap = resolve_snapshot(&e, snapshot)?;
+    let snap = resolve_snapshot(&e, c, caches, snapshot)?;
     let entries = match path {
         None => {
             let mut v: Vec<FileEntry> = snap
@@ -508,28 +493,38 @@ fn list_files(c: &Config, snapshot: &str, path: Option<&str>) -> Result<Response
         }
         Some(p) => {
             check_restic_path(p)?;
-            e.list_dir(&snap.id, p)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|n| FileEntry {
-                    path: n.path,
-                    name: n.name,
-                    dir: n.dir,
-                    size: n.size,
-                    mtime: n.mtime,
-                })
-                .collect()
+            let tree = caches.tree(&c.repo.to_string_lossy(), &snap.id);
+            tree.dir(
+                p,
+                || e.ls_all_capped(&snap.id, MAX_TREE_NODES).ok().flatten(),
+                || e.list_dir(&snap.id, p).map_err(|e| e.to_string()),
+            )?
+            .into_iter()
+            .map(|n| FileEntry {
+                path: n.path,
+                name: n.name,
+                dir: n.dir,
+                size: n.size,
+                mtime: n.mtime,
+            })
+            .collect()
         }
     };
     Ok(Response::Files { entries })
 }
 
-fn restore(c: &Config, snapshot: &str, target: &str, paths: &[String]) -> Result<Response, String> {
+fn restore(
+    c: &Config,
+    caches: &Caches,
+    snapshot: &str,
+    target: &str,
+    paths: &[String],
+) -> Result<Response, String> {
     if target.trim().is_empty() {
         return Err("no folder to restore into".into());
     }
     let e = engine(c)?;
-    let snap = resolve_snapshot(&e, snapshot)?;
+    let snap = resolve_snapshot(&e, c, caches, snapshot)?;
     let items = if paths.is_empty() {
         top_paths(&snap)
     } else {
@@ -638,7 +633,12 @@ fn delete_original(p: &Path) -> io::Result<()> {
 }
 
 /// Move `paths` into the vault: back up, verify every file by name and size, only then delete.
-fn vault_add(c: &Config, volume: Option<&str>, paths: &[String]) -> Result<Response, String> {
+fn vault_add(
+    c: &Config,
+    caches: &Caches,
+    volume: Option<&str>,
+    paths: &[String],
+) -> Result<Response, String> {
     if paths.is_empty() {
         return Err("nothing chosen to move into the vault".into());
     }
@@ -651,9 +651,10 @@ fn vault_add(c: &Config, volume: Option<&str>, paths: &[String]) -> Result<Respo
     }
     let e = engine(c)?;
     let locals: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    let snapshot = e
-        .backup_paths(&locals, lifeboat_engine::VAULT_TAG)
-        .map_err(|e| format!("could not copy into the vault; nothing was deleted: {e}"))?;
+    let snapshot = e.backup_paths(&locals, lifeboat_engine::VAULT_TAG);
+    caches.invalidate_snapshots();
+    let snapshot =
+        snapshot.map_err(|e| format!("could not copy into the vault; nothing was deleted: {e}"))?;
     // Compare what is on disk now with what the snapshot holds.
     let mut bad = Vec::new();
     for (p, local) in paths.iter().zip(&locals) {
@@ -683,24 +684,29 @@ fn vault_add(c: &Config, volume: Option<&str>, paths: &[String]) -> Result<Respo
     })
 }
 
-fn vault_list(c: &Config) -> Result<Response, String> {
+fn vault_list(c: &Config, caches: &Caches) -> Result<Response, String> {
     let e = engine(c)?;
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
-    for s in vault_snapshots(&e)? {
+    for s in vault_snapshots(&e, c, caches)? {
         for p in &s.paths {
             let rp = lifeboat_engine::to_restic_path(p);
             if !seen.insert(rp.to_lowercase()) {
                 continue; // an older copy of a path added again
             }
-            let nodes = e.ls(&s.id, &rp, true).map_err(|e| e.to_string())?;
-            let dir = nodes
-                .iter()
-                .any(|n| n.dir && n.path.eq_ignore_ascii_case(&rp));
+            let (dir, size) = caches.size_of(&c.repo.to_string_lossy(), &s.id, &rp, || {
+                let nodes = e.ls(&s.id, &rp, true).map_err(|e| e.to_string())?;
+                Ok((
+                    nodes
+                        .iter()
+                        .any(|n| n.dir && n.path.eq_ignore_ascii_case(&rp)),
+                    nodes.iter().filter(|n| !n.dir).map(|n| n.size).sum(),
+                ))
+            })?;
             items.push(VaultItem {
                 path: p.clone(),
                 dir,
-                size: nodes.iter().filter(|n| !n.dir).map(|n| n.size).sum(),
+                size,
                 added: s.time.clone(),
                 snapshot: s.id.clone(),
             });
@@ -709,7 +715,12 @@ fn vault_list(c: &Config) -> Result<Response, String> {
     Ok(Response::Vault { items })
 }
 
-fn vault_extract(c: &Config, paths: &[String], target: &str) -> Result<Response, String> {
+fn vault_extract(
+    c: &Config,
+    caches: &Caches,
+    paths: &[String],
+    target: &str,
+) -> Result<Response, String> {
     if paths.is_empty() {
         return Err("nothing chosen to take out of the vault".into());
     }
@@ -717,7 +728,7 @@ fn vault_extract(c: &Config, paths: &[String], target: &str) -> Result<Response,
         return Err("no folder to copy into".into());
     }
     let e = engine(c)?;
-    let snaps = vault_snapshots(&e)?;
+    let snaps = vault_snapshots(&e, c, caches)?;
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     for p in paths {
         let key = lifeboat_engine::to_restic_path(p).to_lowercase();
@@ -751,6 +762,32 @@ pub fn handle_line(
     limiter: &RateLimiter,
     is_admin: &dyn Fn() -> bool,
 ) -> Response {
+    let started = std::time::Instant::now();
+    let r = dispatch(line, st, limiter, is_admin);
+    // Request name and time only: never the request body (it may hold a password).
+    eprintln!(
+        "[req] {} {} ms",
+        request_name(line),
+        started.elapsed().as_millis()
+    );
+    r
+}
+
+/// The `"cmd"` value of a request line (a variant name), or `?`.
+fn request_name(line: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str().map(str::to_owned)))
+        .filter(|n| n.len() < 40 && n.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| "?".into())
+}
+
+fn dispatch(
+    line: &str,
+    st: &State,
+    limiter: &RateLimiter,
+    is_admin: &dyn Fn() -> bool,
+) -> Response {
     let req = match serde_json::from_str::<Request>(line) {
         Ok(r) => r,
         Err(e) => {
@@ -772,11 +809,11 @@ pub fn handle_line(
             )),
             Outcome::Error(e) => err(e),
         },
-        Request::ListSnapshots => {
-            with_volume(st, &cfg, |c, _| list_snapshots(c).unwrap_or_else(err))
-        }
+        Request::ListSnapshots => with_volume(st, &cfg, |c, _| {
+            list_snapshots(c, &st.ctx.caches).unwrap_or_else(err)
+        }),
         Request::ListFiles { snapshot, path } => with_volume(st, &cfg, |c, _| {
-            list_files(c, &snapshot, path.as_deref()).unwrap_or_else(err)
+            list_files(c, &st.ctx.caches, &snapshot, path.as_deref()).unwrap_or_else(err)
         }),
         Request::Restore {
             snapshot,
@@ -787,7 +824,7 @@ pub fn handle_line(
             if let Err(r) = password_gate(c, limiter, &password) {
                 return refused(r);
             }
-            restore(c, &snapshot, &target, &paths).unwrap_or_else(err)
+            restore(c, &st.ctx.caches, &snapshot, &target, &paths).unwrap_or_else(err)
         }),
         Request::VaultAdd { password, paths } => {
             if is_frozen(st) {
@@ -797,10 +834,12 @@ pub fn handle_line(
                 if let Err(r) = password_gate(c, limiter, &password) {
                     return refused(r);
                 }
-                vault_add(c, volume, &paths).unwrap_or_else(err)
+                vault_add(c, &st.ctx.caches, volume, &paths).unwrap_or_else(err)
             })
         }
-        Request::VaultList => with_volume(st, &cfg, |c, _| vault_list(c).unwrap_or_else(err)),
+        Request::VaultList => with_volume(st, &cfg, |c, _| {
+            vault_list(c, &st.ctx.caches).unwrap_or_else(err)
+        }),
         Request::VaultExtract {
             password,
             paths,
@@ -809,7 +848,7 @@ pub fn handle_line(
             if let Err(r) = password_gate(c, limiter, &password) {
                 return refused(r);
             }
-            vault_extract(c, &paths, &target).unwrap_or_else(err)
+            vault_extract(c, &st.ctx.caches, &paths, &target).unwrap_or_else(err)
         }),
         Request::ListDisks => match lifeboat_disk::list_disks() {
             Ok(disks) => Response::Disks { disks },

@@ -18,8 +18,8 @@ pub use lifeboat_core::disk::{
     DiskInfo, PartitionInfo, PrepareMode, BASIC_DATA_TYPE_GUID, MARKER_FILE,
 };
 pub use ops::{
-    find_lifeboat_volume, hide_lifeboat_volume, list_disks, prepare_external, set_disk_offline,
-    set_disk_online, PreparedVolume,
+    close_volume, find_lifeboat_volume, hide_lifeboat_volume, list_disks, open_volume,
+    prepare_external, set_disk_offline, set_disk_online, PreparedVolume,
 };
 pub use plan::{execute_shrink, plan_shrink, ShrinkPlan};
 

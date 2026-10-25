@@ -2,12 +2,15 @@
 //! check and delayed deletes. Everything the cycle touches outside itself goes through [`Env`],
 //! so the logic is tested with a fake and needs no disk, admin rights or restic.
 
+use crate::ctx::Ctx;
+use crate::lease::Volume;
 use lifeboat_core::config::{CheckResult, Config};
 use lifeboat_detect::{
     assess, check_canaries, create_canaries, Baseline, CanaryManifest, ChangeKind, ChangeSet,
     FileChange, FreezeState, Verdict,
 };
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Weekly integrity check interval.
 pub const CHECK_INTERVAL_SECS: u64 = 7 * 24 * 3600;
@@ -339,32 +342,32 @@ pub fn scan_folders(folders: &[PathBuf], since: u64, manifests: &[CanaryManifest
 }
 
 /// Production environment: real disk, restic and folders.
+///
+/// The volume comes from the shared lease (`Ctx`): `mount` takes it and keeps it for the whole
+/// cycle (so the idle timer cannot hide it mid-backup), `hide` lets go of it, and the lease
+/// re-hides and offlines the disk after its idle time (or at once when this was the only user
+/// and the service stops). Restic calls take the repository lock: a backup shares it with
+/// browsing; forget / prune / check exclude everything else.
 pub struct RealEnv {
     pub cfg: Config,
     pub canaries: PathBuf,
+    pub ctx: Arc<Ctx>,
+    pub held: Mutex<Option<Arc<Volume>>>,
 }
 
 impl RealEnv {
     fn engine(&self) -> lifeboat_engine::Engine {
+        let mut repo = self.cfg.repo.clone();
+        if let Some(v) = self.held.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            repo = PathBuf::from(&v.path).join("repo");
+        }
         lifeboat_engine::Engine::new(
             lifeboat_engine::Engine::default_restic(),
-            self.cfg.repo.clone(),
+            repo,
             self.cfg.password.clone(),
             self.cfg.folders.clone(),
         )
     }
-}
-
-/// Disk number holding the partition with `guid`, and whether it is shared
-/// (holds Windows or another drive, so it must never be taken offline).
-pub fn disk_of(guid: &str) -> Option<(u32, bool)> {
-    let disks = lifeboat_disk::list_disks().ok()?;
-    disks.into_iter().find_map(|d| {
-        d.partitions
-            .iter()
-            .any(|p| lifeboat_core::disk::same_guid(&p.guid, guid))
-            .then_some((d.number, d.is_shared()))
-    })
 }
 
 impl Env for RealEnv {
@@ -378,41 +381,17 @@ impl Env for RealEnv {
             // Test override without a partition: the repo is a plain folder.
             return Ok(Mount { disk: None });
         }
-        let (disk, shared) = disk_of(guid).ok_or("backup disk not found")?;
-        let mut offline_after = None;
-        if !shared {
-            lifeboat_disk::set_disk_online(disk).map_err(|e| e.to_string())?;
-            offline_after = Some(disk);
-        }
-        let m = Mount {
-            disk: offline_after,
-        };
-        // From here the guard in run_cycle owns the offline step; on failure do it here.
-        match lifeboat_disk::find_lifeboat_volume(guid) {
-            Ok(Some(_)) => Ok(m),
-            Ok(None) => {
-                self.hide();
-                if let Some(d) = m.disk {
-                    self.offline(d);
-                }
-                Err("backup volume not found or marker mismatch".into())
-            }
-            Err(e) => {
-                self.hide();
-                if let Some(d) = m.disk {
-                    self.offline(d);
-                }
-                Err(e.to_string())
-            }
-        }
+        let v = self.ctx.volume(guid)?;
+        *self.held.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+        // The lease owns hide + offline, so the cycle has no disk to take offline itself.
+        Ok(Mount { disk: None })
     }
 
-    fn offline(&self, disk: u32) {
-        let _ = lifeboat_disk::set_disk_offline(disk);
-    }
+    fn offline(&self, _disk: u32) {}
 
     fn hide(&self) {
-        let _ = lifeboat_disk::hide_lifeboat_volume(&self.cfg.partition_guid);
+        // Let go of the lease; it re-hides after its idle time.
+        self.held.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 
     fn scan(&self, since: u64) -> Result<ChangeSet, String> {
@@ -424,10 +403,14 @@ impl Env for RealEnv {
     }
 
     fn backup(&self) -> Result<String, String> {
-        self.engine().backup().map_err(|e| e.to_string())
+        let _r = self.ctx.read();
+        let r = self.engine().backup().map_err(|e| e.to_string());
+        self.ctx.caches.invalidate_snapshots();
+        r
     }
 
     fn latest_snapshot(&self) -> Result<Option<String>, String> {
+        let _r = self.ctx.read();
         let mut v = self.engine().snapshots().map_err(|e| e.to_string())?;
         // Vault snapshots are not backups of the watched folders.
         v.retain(|s| !s.tags.iter().any(|t| t == lifeboat_engine::VAULT_TAG));
@@ -436,23 +419,35 @@ impl Env for RealEnv {
     }
 
     fn tag_pre_alert(&self, id: &str) -> Result<(), String> {
-        self.engine()
+        let _r = self.ctx.read();
+        let r = self
+            .engine()
             .tag_add(id, lifeboat_engine::PRE_ALERT_TAG)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        self.ctx.caches.invalidate_snapshots();
+        r
     }
 
     fn retention(&self) -> Result<(), String> {
-        self.engine().apply_retention().map_err(|e| e.to_string())
+        let _w = self.ctx.write();
+        let r = self.engine().apply_retention().map_err(|e| e.to_string());
+        self.ctx.caches.invalidate_all();
+        r
     }
 
     fn check_subset(&self) -> Result<(), String> {
+        let _w = self.ctx.write();
         self.engine().check_subset().map_err(|e| e.to_string())
     }
 
     fn forget(&self, ids: &[String]) -> Result<(), String> {
-        self.engine()
+        let _w = self.ctx.write();
+        let r = self
+            .engine()
             .forget_snapshots(ids)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        self.ctx.caches.invalidate_all();
+        r
     }
 }
 
