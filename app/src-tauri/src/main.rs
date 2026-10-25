@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod admin;
 mod folders;
 mod pipe;
 mod target;
 
 use lifeboat_core::disk::{DiskInfo, PrepareMode};
-use lifeboat_core::ipc::{SnapshotInfo, PIPE_NAME};
+use lifeboat_core::ipc::{FileEntry, SnapshotInfo, VaultItem, PIPE_NAME};
 use pipe::{ApiError, StatusInfo};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -84,13 +85,80 @@ async fn list_snapshots() -> Result<Vec<SnapshotInfo>, ApiError> {
     blocking(|| pipe::snapshots(PIPE_NAME)).await
 }
 
+/// Restore `paths` (empty = the whole version). Returns the folder the files landed in.
 #[tauri::command]
-async fn restore(snapshot: String, target: String, password: String) -> Result<(), ApiError> {
+async fn restore(
+    snapshot: String,
+    target: String,
+    password: String,
+    paths: Vec<String>,
+) -> Result<String, ApiError> {
     if password.is_empty() {
         return Err(ApiError::other("Please type your Lifeboat password."));
     }
     target::check_restore_target(&target).map_err(ApiError::other)?;
-    blocking(move || pipe::restore(PIPE_NAME, &snapshot, &target, &password)).await
+    blocking(move || pipe::restore(PIPE_NAME, &snapshot, &target, &password, paths)).await
+}
+
+#[tauri::command]
+async fn list_files(snapshot: String, path: Option<String>) -> Result<Vec<FileEntry>, ApiError> {
+    blocking(move || pipe::list_files(PIPE_NAME, &snapshot, path)).await
+}
+
+#[tauri::command]
+async fn vault_add(password: String, paths: Vec<String>) -> Result<u32, ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other("Please type your Lifeboat password."));
+    }
+    if paths.is_empty() {
+        return Err(ApiError::other("Please choose what to put in the vault."));
+    }
+    blocking(move || pipe::vault_add(PIPE_NAME, &password, paths)).await
+}
+
+#[tauri::command]
+async fn vault_list() -> Result<Vec<VaultItem>, ApiError> {
+    blocking(|| pipe::vault_list(PIPE_NAME)).await
+}
+
+#[tauri::command]
+async fn vault_extract(
+    password: String,
+    paths: Vec<String>,
+    target: String,
+) -> Result<String, ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other("Please type your Lifeboat password."));
+    }
+    target::check_restore_target(&target).map_err(ApiError::other)?;
+    blocking(move || pipe::vault_extract(PIPE_NAME, &password, paths, &target)).await
+}
+
+/// Show a folder in Explorer. The path is one argument, never a shell string.
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), ApiError> {
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(ApiError::other("That folder could not be found."));
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| ApiError::other("Could not open the folder."))
+}
+
+#[tauri::command]
+fn is_admin() -> bool {
+    admin::is_admin()
+}
+
+/// Start a new elevated copy of Lifeboat and quit this one. If the user says No in the
+/// Windows prompt, this stays open and returns a friendly message.
+#[tauri::command]
+fn relaunch_as_admin(app: AppHandle) -> Result<(), ApiError> {
+    admin::relaunch_as_admin().map_err(ApiError::other)?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -253,7 +321,15 @@ fn spawn_poller(app: AppHandle) {
 }
 
 fn main() {
+    // After "Restart as administrator" the old copy is still closing: wait for it first.
+    if let Some(pid) = admin::relaunched_from(&std::env::args().collect::<Vec<_>>()) {
+        admin::wait_for_exit(pid, Duration::from_secs(5));
+    }
     tauri::Builder::default()
+        // A second launch only brings the first window forward.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_window(app)
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
@@ -277,7 +353,14 @@ fn main() {
             prepare_disk,
             add_folder,
             remove_folder,
-            init_repo
+            init_repo,
+            list_files,
+            vault_add,
+            vault_list,
+            vault_extract,
+            open_folder,
+            is_admin,
+            relaunch_as_admin
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lifeboat");

@@ -45,7 +45,7 @@ const RULES: { test: RegExp; title: string; next: string; unreachable?: boolean 
   {
     test: /needs administrator/i,
     title: "This step needs administrator permission.",
-    next: 'Close Lifeboat, open it again with "Run as administrator", and repeat this step.',
+    next: 'Press "Restart as administrator" and repeat this step.',
   },
   {
     test: /too many wrong|locked for \d+ minutes/i,
@@ -69,6 +69,12 @@ const RULES: { test: RegExp; title: string; next: string; unreachable?: boolean 
     unreachable: true,
   },
 ];
+
+/** True when the error is the "needs administrator" refusal, so the screen can offer a restart button. */
+export function needsAdmin(e: unknown): boolean {
+  const m = e && typeof e === "object" ? ((e as Raw).message ?? "") : typeof e === "string" ? e : "";
+  return /needs administrator/i.test(m);
+}
 
 /** Map an ApiError (or anything thrown) to friendly text. */
 export function friendlyError(e: unknown): FriendlyError {

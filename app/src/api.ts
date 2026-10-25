@@ -38,6 +38,23 @@ export interface Disk {
   partitions: Partition[];
 }
 
+export interface FileEntry {
+  path: string;
+  name: string;
+  dir: boolean;
+  size: number;
+  /** ISO time the file was last changed, or empty when unknown. */
+  mtime: string;
+}
+export interface VaultItem {
+  path: string;
+  dir: boolean;
+  size: number;
+  /** ISO time it was put in the vault. */
+  added: string;
+  snapshot: string;
+}
+
 /** Turn whatever invoke rejected with into an ApiError. */
 export function toApiError(e: unknown): ApiError {
   if (e && typeof e === "object" && "message" in e && "kind" in e) return e as ApiError;
@@ -56,8 +73,19 @@ export const api = {
   homeState: () => call<HomeState>("home_state"),
   backupNow: () => call<void>("backup_now"),
   snapshots: () => call<Snapshot[]>("list_snapshots"),
-  restore: (snapshot: string, target: string, password: string) =>
-    call<void>("restore", { snapshot, target, password }),
+  /** Restore `paths` of a version (empty list = everything). Resolves to the folder used. */
+  restore: (snapshot: string, target: string, password: string, paths: string[] = []) =>
+    call<string>("restore", { snapshot, target, password, paths }),
+  /** One level of a version's files. `path` omitted = the top. */
+  listFiles: (snapshot: string, path?: string) =>
+    call<FileEntry[]>("list_files", { snapshot, path: path ?? null }),
+  vaultAdd: (password: string, paths: string[]) => call<number>("vault_add", { password, paths }),
+  vaultList: () => call<VaultItem[]>("vault_list"),
+  vaultExtract: (password: string, paths: string[], target: string) =>
+    call<string>("vault_extract", { password, paths, target }),
+  openFolder: (path: string) => call<void>("open_folder", { path }),
+  isAdmin: () => call<boolean>("is_admin"),
+  relaunchAsAdmin: () => call<void>("relaunch_as_admin"),
   disks: () => call<Disk[]>("list_disks"),
   prepareDisk: (
     disk: number,

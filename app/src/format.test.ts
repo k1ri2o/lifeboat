@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel } from "./format";
+import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -103,5 +103,31 @@ describe("inlineTimeLabel", () => {
   it("lowercases today/yesterday for mid-sentence use", () => {
     expect(inlineTimeLabel(new Date(2026, 9, 24, 20, 41).toISOString(), now)).toBe("today at 8:41 PM");
     expect(inlineTimeLabel(new Date(2026, 9, 23, 15, 0).toISOString(), now)).toBe("yesterday at 3 PM");
+  });
+});
+
+describe("v0.1.8 plain-word helpers", () => {
+  const now = new Date(2026, 9, 25, 15, 0);
+  it("smallSize", () => {
+    expect(smallSize(532)).toBe("532 bytes");
+    expect(smallSize(48 * 1024)).toBe("48 KB");
+    expect(smallSize(3.2 * 1024 * 1024)).toBe("3.2 MB");
+    expect(smallSize(1.5 * 1024 ** 3)).toBe("1.5 GB");
+  });
+  it("dayTime and lastBackupStamp", () => {
+    expect(dayTime(new Date(2026, 9, 25, 14, 5), now)).toBe("today 14:05");
+    expect(dayTime(new Date(2026, 9, 24, 9, 30), now)).toBe("yesterday 09:30");
+    expect(dayTime(new Date(2026, 2, 3, 9, 30), now)).toBe("3 March 09:30");
+    expect(lastBackupStamp(new Date(2026, 9, 25, 14, 5).getTime() / 1000, now)).toBe("Last backup: today 14:05");
+    expect(lastBackupStamp(null, now)).toBe("Last backup: none yet");
+  });
+  it("versionCountLine, plainDate, baseName, restoreFolderName", () => {
+    expect(versionCountLine(1)).toBe("1 saved version");
+    expect(versionCountLine(12)).toBe("12 saved versions");
+    expect(plainDate(new Date(2026, 9, 24, 9, 30).toISOString(), now)).toBe("yesterday");
+    expect(plainDate("", now)).toBe("");
+    expect(baseName("C:\\Users\\Dad\\Pictures")).toBe("Pictures");
+    expect(baseName("/C/Users/Dad/a.txt")).toBe("a.txt");
+    expect(restoreFolderName(now)).toBe("Lifeboat restore 2026-10-25");
   });
 });
