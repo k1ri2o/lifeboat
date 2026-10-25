@@ -226,6 +226,25 @@ export function deleteConfirmText(now: Date = new Date()): string {
   return `This backup will be deleted on ${longDate(deleteDueDate(now))}. You can cancel until then.`;
 }
 
+/** The plain-words confirmation shown before a vault item removal is queued. */
+export function vaultRemoveConfirmText(now: Date = new Date()): string {
+  return `It will be removed from the vault on ${longDate(deleteDueDate(now))}. You can cancel until then.`;
+}
+
+/** "Removes on 1 November 2026" for a queued vault removal (`dueSecs` in unix seconds). */
+export function removesOnLine(dueSecs: number): string {
+  const d = new Date(dueSecs * 1000);
+  return Number.isNaN(d.getTime()) ? "Will be removed soon" : `Removes on ${longDate(d)}`;
+}
+
+/** Title for the waiting-deletes bar, counting backups and vault items. */
+export function waitingDeletesTitle(backups: number, items: number): string {
+  const b = backups === 1 ? "1 backup" : `${backups} backups`;
+  const i = items === 1 ? "1 vault item" : `${items} vault items`;
+  const what = backups && items ? `${b} and ${i}` : backups ? b : i;
+  return `${what} will be ${items && !backups ? "removed" : "deleted"}`;
+}
+
 export interface Pending {
   id: string;
   due: number;

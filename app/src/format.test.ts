@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote, deleteDueDate, deleteConfirmText, pendingFor, deletesOnLine, longDate } from "./format";
+import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote, deleteDueDate, deleteConfirmText, pendingFor, deletesOnLine, longDate, removesOnLine, vaultRemoveConfirmText, waitingDeletesTitle } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -170,5 +170,21 @@ describe("delete helpers", () => {
   it("shows the due date of a queued delete", () => {
     expect(deletesOnLine(new Date(2026, 10, 1, 12).getTime() / 1000)).toBe("Deletes on 1 November 2026");
     expect(deletesOnLine(NaN)).toBe("Will be deleted soon");
+  });
+});
+
+describe("vault removal helpers", () => {
+  it("says when a vault item is removed", () => {
+    expect(removesOnLine(new Date(2026, 10, 1, 12).getTime() / 1000)).toBe("Removes on 1 November 2026");
+    expect(removesOnLine(NaN)).toBe("Will be removed soon");
+  });
+  it("confirms with the date and the cancel promise", () => {
+    expect(vaultRemoveConfirmText(new Date(2026, 9, 25))).toBe("It will be removed from the vault on 1 November 2026. You can cancel until then.");
+  });
+  it("titles the waiting deletes bar", () => {
+    expect(waitingDeletesTitle(0, 1)).toBe("1 vault item will be removed");
+    expect(waitingDeletesTitle(0, 3)).toBe("3 vault items will be removed");
+    expect(waitingDeletesTitle(2, 0)).toBe("2 backups will be deleted");
+    expect(waitingDeletesTitle(1, 2)).toBe("1 backup and 2 vault items will be deleted");
   });
 });

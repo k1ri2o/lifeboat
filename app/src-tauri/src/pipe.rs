@@ -2,7 +2,7 @@
 //!
 //! Every function takes the pipe name so tests can talk to a fake server.
 
-use lifeboat_core::config::PendingDelete;
+use lifeboat_core::config::{PendingDelete, PendingVaultRemove};
 use lifeboat_core::disk::{DiskInfo, PrepareMode};
 use lifeboat_core::ipc::{client, FileEntry, Request, Response, SnapshotInfo, VaultItem};
 use serde::Serialize;
@@ -59,6 +59,8 @@ pub struct StatusInfo {
     pub last_run: Option<u64>,
     /// Backups queued for deletion (id and due time).
     pub pending_deletes: Vec<PendingDelete>,
+    /// Vault items queued for removal (path and due time).
+    pub pending_vault_removes: Vec<PendingVaultRemove>,
 }
 
 fn call(pipe: &str, req: &Request) -> Result<Response, ApiError> {
@@ -101,6 +103,7 @@ pub fn status(pipe: &str) -> Result<StatusInfo, ApiError> {
             frozen_since,
             last_run,
             pending_deletes,
+            pending_vault_removes,
             ..
         } => Ok(StatusInfo {
             version,
@@ -108,6 +111,7 @@ pub fn status(pipe: &str) -> Result<StatusInfo, ApiError> {
             frozen_since,
             last_run,
             pending_deletes,
+            pending_vault_removes,
         }),
         r => Err(unexpected(r)),
     }
@@ -153,6 +157,18 @@ pub fn delete_snapshots(pipe: &str, password: &str, ids: Vec<String>) -> Result<
     let req = Request::DeleteSnapshots {
         password: password.to_string(),
         ids,
+    };
+    match call(pipe, &req)? {
+        Response::Done => Ok(()),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Queue vault items for removal; the service removes them after its delay (7 days).
+pub fn vault_remove(pipe: &str, password: &str, paths: Vec<String>) -> Result<(), ApiError> {
+    let req = Request::VaultRemove {
+        password: password.to_string(),
+        paths,
     };
     match call(pipe, &req)? {
         Response::Done => Ok(()),
@@ -345,9 +361,16 @@ mod tests {
                     id: "abc".into(),
                     due: 1_700_600_000,
                 }],
+                pending_vault_removes: vec![PendingVaultRemove {
+                    path: "C:/Secret".into(),
+                    snapshot: String::new(),
+                    due: 1_700_700_000,
+                }],
             }
         });
         let s = on_thread(move || status(&pipe)).await.unwrap();
+        assert_eq!(s.pending_vault_removes.len(), 1);
+        assert_eq!(s.pending_vault_removes[0].due, 1_700_700_000);
         assert_eq!(s.pending_deletes.len(), 1);
         assert_eq!(s.pending_deletes[0].due, 1_700_600_000);
         assert_eq!(s.last_run, Some(1_700_000_000));
@@ -425,6 +448,29 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn vault_remove_sends_paths_and_shows_refusal() {
+        let (pipe, h) = fake_server("vaultrm", 2, |req| match req {
+            Request::VaultRemove { password, paths } if password == "pw" => {
+                assert_eq!(paths, vec![r"C:\Secret".to_string()]);
+                Response::Done
+            }
+            Request::VaultRemove { .. } => Response::Error {
+                message: "password wrong".into(),
+            },
+            other => panic!("unexpected {other:?}"),
+        });
+        let p2 = pipe.clone();
+        on_thread(move || vault_remove(&pipe, "pw", vec![r"C:\Secret".into()]))
+            .await
+            .unwrap();
+        let err = on_thread(move || vault_remove(&p2, "bad", vec![r"C:\Secret".into()]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "That password is not right. Please try again.");
+        h.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn cancel_delete_sends_password_and_shows_refusal() {
         let (pipe, h) = fake_server("canceldel", 2, |req| match req {
             Request::CancelDelete { password } if password == "pw" => Response::Done,
@@ -486,6 +532,7 @@ mod tests {
                     size: 99,
                     added: "2026-10-24T09:00:00Z".into(),
                     snapshot: "s1".into(),
+                    removes_at: None,
                 }],
             },
             Request::VaultExtract {
