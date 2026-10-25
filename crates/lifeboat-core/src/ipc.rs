@@ -65,6 +65,9 @@ pub enum Request {
     InitRepo {
         password: String,
         folders: Vec<String>,
+        /// Move an old repository with another password aside and start a new one.
+        #[serde(default)]
+        fresh: bool,
     },
     /// Queue snapshot deletes; they run after a delay (7 days). Needs the password.
     DeleteSnapshots {
@@ -306,6 +309,7 @@ mod tests {
             Request::InitRepo {
                 password: "p".into(),
                 folders: vec!["C:/Docs".into()],
+                fresh: false,
             },
             Request::DeleteSnapshots {
                 password: "p".into(),

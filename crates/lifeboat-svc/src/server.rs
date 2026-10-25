@@ -265,12 +265,52 @@ fn folder_strings(cfg: &Config) -> Vec<String> {
         .collect()
 }
 
-/// Create the repository on the Lifeboat volume, add the recovery key, plant canaries, save.
-fn init_repo(st: &State, password: String, folders: Vec<String>) -> Response {
-    let cfg = st.snapshot_cfg();
-    if !cfg.repo.as_os_str().is_empty() {
-        return err("a backup repository already exists");
+/// The message for a Lifeboat disk that already holds backups made with another password.
+/// The app matches on "another password" to offer starting a new backup.
+pub const OTHER_PASSWORD: &str = "This Lifeboat disk already holds backups made with another password. Type that password to keep them, or start a new backup (the old one is kept aside).";
+
+/// What `init_repo` does with the repository folder on the Lifeboat volume.
+#[derive(Debug, PartialEq, Eq)]
+enum Existing {
+    /// No repository there yet: create one.
+    None,
+    /// A repository is there and the password opens it (a retry after a step failed or the
+    /// app lost the answer): reuse it.
+    Reuse,
+}
+
+/// Decide from the password check what to do with the repository folder.
+fn existing_repo(check: Result<(), Refusal>) -> Result<Existing, String> {
+    match check {
+        Ok(()) => Ok(Existing::Reuse),
+        Err(Refusal::Unavailable(m)) if repo_missing(&m) => Ok(Existing::None),
+        Err(Refusal::WrongPassword) => Err(OTHER_PASSWORD.into()),
+        Err(r) => Err(r.to_string()),
     }
+}
+
+/// Move an old repository out of the way (never deleted) so a new one can be made.
+fn set_aside(repo: &Path) -> Result<(), String> {
+    if !repo.exists() {
+        return Ok(());
+    }
+    let to = repo.with_file_name(format!("repo-old-{}", now_unix()));
+    std::fs::rename(repo, &to).map_err(|e| format!("cannot move the old backup aside: {e}"))
+}
+
+/// Create the repository on the Lifeboat volume, add the recovery key, plant canaries, save.
+///
+/// Safe to call again: a saved repo path from an earlier, unfinished setup is replaced, and a
+/// repository that the same password opens is reused (a new recovery key is made). With
+/// `fresh`, an old repository with another password is moved aside first.
+fn init_repo(
+    st: &State,
+    limiter: &RateLimiter,
+    password: String,
+    folders: Vec<String>,
+    fresh: bool,
+) -> Response {
+    let cfg = st.snapshot_cfg();
     if password.is_empty() {
         return err("password must not be empty");
     }
@@ -294,12 +334,28 @@ fn init_repo(st: &State, password: String, folders: Vec<String>) -> Response {
         password.clone(),
         folders.clone(),
     );
+    // Wrong guesses count against the same lockout as every other password check.
+    let check = gate(limiter, Instant::now(), || {
+        eng.verify_password(&password).map_err(|e| e.to_string())
+    });
+    let existing = match existing_repo(check) {
+        Ok(e) => e,
+        Err(m) if fresh && m == OTHER_PASSWORD => {
+            if let Err(e) = set_aside(&repo) {
+                return err(e);
+            }
+            Existing::None
+        }
+        Err(m) => return err(m),
+    };
     let key = match generate_recovery_key() {
         Ok(k) => k,
         Err(e) => return err(e),
     };
-    if let Err(e) = eng.init() {
-        return err(format!("cannot create repository: {e}"));
+    if existing == Existing::None {
+        if let Err(e) = eng.init() {
+            return err(format!("cannot create repository: {e}"));
+        }
     }
     if let Err(e) = eng.add_key(&key) {
         return err(format!("cannot add recovery key: {e}"));
@@ -892,11 +948,15 @@ fn dispatch(
                 Err(e) => err(e),
             }
         }
-        Request::InitRepo { password, folders } => {
+        Request::InitRepo {
+            password,
+            folders,
+            fresh,
+        } => {
             if let Err(r) = require_admin(is_admin()) {
                 return refused(r);
             }
-            init_repo(st, password, folders)
+            init_repo(st, limiter, password, folders, fresh)
         }
         Request::DeleteSnapshots { password, ids } => {
             let checked = with_volume(st, &cfg, |c, _| {
@@ -1211,13 +1271,61 @@ mod tests {
     }
 
     #[test]
-    fn init_repo_refused_when_repo_exists_or_not_admin() {
+    fn init_repo_saved_repo_path_does_not_block_a_retry() {
         let d = tempfile::tempdir().unwrap();
         let st = state_with(with_repo(), d.path());
         let line = r#"{"cmd":"InitRepo","password":"x","folders":["C:/Docs"]}"#;
         assert_eq!(message(call(line, &st, false)), "needs administrator");
+        // A repo path left by an unfinished setup is no reason to refuse: it goes on to the
+        // disk (here none is prepared).
         let m = message(call(line, &st, true));
-        assert!(m.contains("already exists"), "{m}");
+        assert!(!m.contains("already exists"), "{m}");
+        assert!(m.contains("no backup disk"), "{m}");
+    }
+
+    #[test]
+    fn existing_repo_decision() {
+        assert_eq!(existing_repo(Ok(())), Ok(Existing::Reuse));
+        assert_eq!(
+            existing_repo(Err(Refusal::Unavailable(
+                "Fatal: repository does not exist: unable to open config file".into()
+            ))),
+            Ok(Existing::None)
+        );
+        assert_eq!(
+            existing_repo(Err(Refusal::WrongPassword)),
+            Err(OTHER_PASSWORD.to_string())
+        );
+        assert!(existing_repo(Err(Refusal::Locked(5))).is_err());
+        assert!(existing_repo(Err(Refusal::Unavailable("disk gone".into()))).is_err());
+    }
+
+    #[test]
+    fn set_aside_moves_never_deletes() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::write(repo.join("config"), b"x").unwrap();
+        set_aside(&repo).unwrap();
+        assert!(!repo.exists());
+        let moved: Vec<_> = std::fs::read_dir(d.path()).unwrap().flatten().collect();
+        assert_eq!(moved.len(), 1);
+        let p = moved[0].path();
+        assert!(p
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("repo-old-"));
+        assert!(p.join("config").exists());
+        // Nothing there: nothing to do.
+        set_aside(&repo).unwrap();
+    }
+
+    #[test]
+    fn init_repo_fresh_defaults_to_false() {
+        let r: Request =
+            serde_json::from_str(r#"{"cmd":"InitRepo","password":"x","folders":[]}"#).unwrap();
+        assert!(matches!(r, Request::InitRepo { fresh: false, .. }));
     }
 
     #[test]

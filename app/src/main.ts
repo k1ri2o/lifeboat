@@ -20,7 +20,7 @@ import {
   snapshotLabel,
   inlineTimeLabel,
 } from "./format";
-import { adminButton, button, errorBox, h, icon, skeleton, spinner, type Child } from "./ui";
+import { adminButton, button, errorBox, h, icon, setLabel, skeleton, spinner, type Child } from "./ui";
 import { fetchFresh, guard, invalidate, peek, sig, swr } from "./cache";
 
 type Screen = "home" | "restore" | "vault" | "settings" | "setup";
@@ -485,7 +485,7 @@ async function renderRestore(body: HTMLElement, home: HomeState, alive: () => bo
   const updateSummary = () => {
     const n = sel.size;
     summary.textContent = n ? `${n} ${n === 1 ? "item" : "items"} chosen. A folder you choose includes everything inside it.` : "Nothing chosen yet. Tick the files or folders you want, or restore everything.";
-    goBtn.querySelector("span")!.textContent = n ? `Restore the ${n} chosen ${n === 1 ? "item" : "items"}` : "Restore everything in this version";
+    setLabel(goBtn, n ? `Restore the ${n} chosen ${n === 1 ? "item" : "items"}` : "Restore everything in this version");
   };
 
   const drawCrumbs = () => {
@@ -667,7 +667,7 @@ async function renderVault(body: HTMLElement, alive: () => boolean = () => true)
 
   const updateTakeOut = () => {
     takeOut.disabled = chosen.size === 0;
-    takeOut.querySelector("span")!.textContent = chosen.size ? `Take out ${chosen.size} ${chosen.size === 1 ? "item" : "items"}` : "Take out";
+    setLabel(takeOut, chosen.size ? `Take out ${chosen.size} ${chosen.size === 1 ? "item" : "items"}` : "Take out");
   };
 
   const drawList = (all: VaultItem[]) => {
@@ -999,7 +999,7 @@ function drawStep3(body: HTMLElement, redraw: () => void) {
       h("p", { class: "muted" }, "Please keep this window open. This can take a few minutes."),
     );
 
-  go1.addEventListener("click", async () => {
+  const run = async (fresh: boolean) => {
     wiz.password = pw.value;
     wiz.password2 = pw2.value;
     if (pw.value.length < 8) return void msg.replaceChildren(errorBox({ kind: "other", message: "Your password needs at least 8 characters." }));
@@ -1013,7 +1013,7 @@ function drawStep3(body: HTMLElement, redraw: () => void) {
         prepared = true;
       }
       showProgress(1);
-      const key = await api.initRepo(pw.value, wiz.folders);
+      const key = await api.initRepo(pw.value, wiz.folders, fresh);
       showProgress(2);
       wiz.password = wiz.password2 = "";
       showRecoveryKey(body, key);
@@ -1021,10 +1021,16 @@ function drawStep3(body: HTMLElement, redraw: () => void) {
     } catch (e) {
       progress.replaceChildren();
       msg.replaceChildren(errorBox(e));
-      if (prepared) go1.querySelector("span")!.textContent = "Try the last step again";
+      // The disk already has backups made with another password: offer a new start that
+      // keeps the old backups aside on the disk.
+      if (String((e as { message?: string })?.message ?? "").includes("another password")) {
+        msg.append(h("div", { class: "actions" }, button("Start a new backup (keep the old one aside)", { onclick: () => void run(true) })));
+      }
+      if (prepared) setLabel(go1, "Try the last step again");
     }
     go1.disabled = back.disabled = false;
-  });
+  };
+  go1.addEventListener("click", () => void run(false));
 
   body.append(
     h("p", { class: "eyebrow" }, "Step 3 of 3"),

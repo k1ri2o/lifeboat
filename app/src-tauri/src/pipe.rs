@@ -241,10 +241,16 @@ pub fn set_folders(
 }
 
 /// First setup: create the repository. Returns the recovery key (shown once, never stored).
-pub fn init_repo(pipe: &str, password: &str, folders: Vec<String>) -> Result<String, ApiError> {
+pub fn init_repo(
+    pipe: &str,
+    password: &str,
+    folders: Vec<String>,
+    fresh: bool,
+) -> Result<String, ApiError> {
     let req = Request::InitRepo {
         password: password.to_string(),
         folders,
+        fresh,
     };
     match call(pipe, &req)? {
         Response::RepoInitialized { recovery_key } => Ok(recovery_key),
@@ -483,7 +489,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn init_repo_returns_key() {
         let (pipe, h) = fake_server("init", 1, |req| match req {
-            Request::InitRepo { password, folders } => {
+            Request::InitRepo {
+                password,
+                folders,
+                fresh,
+            } => {
+                assert!(!fresh);
                 assert_eq!(password, "pw");
                 assert_eq!(folders, vec!["C:/A".to_string()]);
                 Response::RepoInitialized {
@@ -492,7 +503,7 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         });
-        let k = on_thread(move || init_repo(&pipe, "pw", vec!["C:/A".into()]))
+        let k = on_thread(move || init_repo(&pipe, "pw", vec!["C:/A".into()], false))
             .await
             .unwrap();
         assert_eq!(k, "KEY");
