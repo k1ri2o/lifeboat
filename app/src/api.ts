@@ -12,6 +12,12 @@ export interface StatusInfo {
   last_run: number | null;
   /** Backups waiting to be deleted (id and due time in unix seconds). */
   pending_deletes?: PendingDelete[];
+  /** Vault items waiting to be removed (path and due time in unix seconds). */
+  pending_vault_removes?: PendingVaultRemove[];
+}
+export interface PendingVaultRemove {
+  path: string;
+  due: number;
 }
 export interface PendingDelete {
   id: string;
@@ -63,6 +69,8 @@ export interface VaultItem {
   /** ISO time it was put in the vault. */
   added: string;
   snapshot: string;
+  /** Unix seconds the item will be removed, when a removal is queued. */
+  removes_at?: number | null;
 }
 
 /** Turn whatever invoke rejected with into an ApiError. */
@@ -94,6 +102,7 @@ export const api = {
   listFiles: (snapshot: string, path?: string) =>
     call<FileEntry[]>("list_files", { snapshot, path: path ?? null }),
   vaultAdd: (password: string, paths: string[]) => call<number>("vault_add", { password, paths }),
+  vaultRemove: (password: string, paths: string[]) => call<void>("vault_remove", { password, paths }),
   vaultList: () => call<VaultItem[]>("vault_list"),
   vaultExtract: (password: string, paths: string[], target: string) =>
     call<string>("vault_extract", { password, paths, target }),

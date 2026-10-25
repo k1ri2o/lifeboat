@@ -22,7 +22,7 @@ export async function installMock(mode: string): Promise<void> {
     { number: 2, model: "SanDisk Ultra USB", size: 500_000_000_000, bus_type: "USB", is_boot: false, is_system: false, partitions: [] },
     { number: 1, model: "Samsung SSD 870", size: 1_000_000_000_000, bus_type: "SATA", is_boot: false, is_system: false, partitions: [] },
   ];
-  let vault: { path: string; dir: boolean; size: number; added: string; snapshot: string }[] = [
+  let vault: { path: string; dir: boolean; size: number; added: string; snapshot: string; removes_at?: number }[] = [
     { path: "C:\\Users\\Dad\\Documents\\Will.pdf", dir: false, size: 210 * 1024, added: iso(2000), snapshot: "v3" },
   ];
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -81,6 +81,15 @@ export async function installMock(mode: string): Promise<void> {
         await wait(500);
         vault = [...vault, ...(a.paths as string[]).map((p) => ({ path: p, dir: false, size: 120 * 1024, added: iso(1), snapshot: "v0" }))];
         return (a.paths as string[]).length;
+      case "vault_remove":
+        if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
+        await wait(300);
+        vault = vault.map((v) => ((a.paths as string[]).includes(v.path) ? { ...v, removes_at: Math.floor(Date.now() / 1000) + 7 * 86400 } : v));
+        return null;
+      case "cancel_delete":
+        if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
+        vault = vault.map(({ removes_at, ...v }) => v);
+        return null;
       case "vault_list":
         return vault;
       case "vault_extract":

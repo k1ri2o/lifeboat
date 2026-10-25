@@ -24,6 +24,9 @@ import {
   deleteConfirmText,
   deleteDueDate,
   deletesOnLine,
+  removesOnLine,
+  vaultRemoveConfirmText,
+  waitingDeletesTitle,
   pendingFor,
 } from "./format";
 import { adminButton, button, errorBox, h, icon, setLabel, skeleton, spinner, type Child } from "./ui";
@@ -586,10 +589,11 @@ async function renderRestore(body: HTMLElement, home: HomeState, alive: () => bo
   const list = h("div", { class: "choices", role: "radiogroup", "aria-label": "Backup times" });
   // Backups waiting to be deleted. Updated here after a delete or cancel so the screen is right at once.
   let pending = [...(home.status.pending_deletes ?? [])];
+  let vaultPending = (home.status.pending_vault_removes ?? []).length;
   const pendingBar = h("div", { "aria-live": "polite" });
   const drawPending = () => {
-    if (!pending.length) return pendingBar.replaceChildren();
-    const n = pending.length;
+    if (!pending.length && !vaultPending) return pendingBar.replaceChildren();
+    const n = pending.length + vaultPending;
     pendingBar.replaceChildren(
       h(
         "div",
@@ -598,7 +602,7 @@ async function renderRestore(body: HTMLElement, home: HomeState, alive: () => bo
         h(
           "div",
           { class: "notice-body" },
-          h("p", { class: "notice-title" }, n === 1 ? "1 backup will be deleted" : `${n} backups will be deleted`),
+          h("p", { class: "notice-title" }, waitingDeletesTitle(pending.length, vaultPending)),
           h("p", { class: "muted" }, "You can cancel until the date shown next to each one. Cancelling stops all waiting deletes, not just one."),
           button("Cancel delete", {
             onclick: () =>
@@ -608,6 +612,7 @@ async function renderRestore(body: HTMLElement, home: HomeState, alive: () => bo
                 async (password) => {
                   await api.cancelDelete(password);
                   pending = [];
+                  vaultPending = 0;
                   drawPending();
                   drawVersions();
                 },
@@ -736,8 +741,50 @@ async function renderVault(body: HTMLElement, alive: () => boolean = () => true)
     setLabel(takeOut, chosen.size ? `Take out ${chosen.size} ${chosen.size === 1 ? "item" : "items"}` : "Take out");
   };
 
+  const cancelBar = h("div", { "aria-live": "polite" });
+  const drawCancelBar = (items: VaultItem[]) => {
+    const n = items.filter((it) => it.removes_at).length;
+    if (!n) return cancelBar.replaceChildren();
+    cancelBar.replaceChildren(
+      h(
+        "div",
+        { class: "notice warn" },
+        icon("alert", 22),
+        h(
+          "div",
+          { class: "notice-body" },
+          h("p", { class: "notice-title" }, waitingDeletesTitle(0, n)),
+          h("p", { class: "muted" }, "You can cancel until the date shown next to each one. Cancelling stops all waiting deletes, not just one."),
+          button("Cancel delete", {
+            onclick: () =>
+              askPassword(
+                "Cancel delete",
+                `This stops all ${n === 1 ? "the waiting removal" : `${n} waiting removals`}. Your vault stays as it is.`,
+                async (password) => {
+                  await api.cancelDelete(password);
+                  void loadList(true);
+                },
+                "Password or recovery key",
+              ),
+          }),
+        ),
+      ),
+    );
+  };
+  const askRemove = (it: VaultItem) =>
+    askPassword(
+      "Remove from the vault",
+      `${baseName(it.path)}: ${vaultRemoveConfirmText()}`,
+      async (password) => {
+        await api.vaultRemove(password, [it.path]);
+        void loadList(true);
+      },
+      "Password or recovery key",
+    );
+
   const drawList = (all: VaultItem[]) => {
       chosen.clear();
+      drawCancelBar(all);
       updateTakeOut();
       const items = [...all].sort((a, b) => b.added.localeCompare(a.added));
       if (!items.length) return listHolder.replaceChildren(h("p", { class: "muted empty" }, "The vault is empty. Add files or a folder to keep them only in the safe."));
@@ -761,6 +808,14 @@ async function renderVault(body: HTMLElement, alive: () => boolean = () => true)
               h("div", { class: "grow" }, h("div", { class: "file-name" }, p.name), p.where ? h("div", { class: "muted small", title: it.path }, p.where) : null),
               h("span", { class: "muted small file-meta" }, it.dir ? "Folder" : smallSize(it.size)),
               h("span", { class: "muted small file-meta" }, it.added ? `Added ${plainDate(it.added)}` : ""),
+              it.removes_at ? h("span", { class: "pill warn" }, removesOnLine(it.removes_at)) : null,
+              it.removes_at
+                ? null
+                : (() => {
+                    const b = button("Remove", { cls: "quiet", icon: "trash", onclick: () => askRemove(it) });
+                    b.setAttribute("aria-label", `Remove ${baseName(it.path)} from the vault`);
+                    return b;
+                  })(),
             );
           }),
         ),
@@ -820,6 +875,7 @@ async function renderVault(body: HTMLElement, alive: () => boolean = () => true)
     h("p", { class: "muted" }, "Backed up: stays on your PC, a copy is in the safe. Vault: only in the safe."),
     h("div", { class: "actions" }, button("Add files", { icon: "file", cls: "primary", onclick: (e) => void busy1(e.currentTarget as HTMLButtonElement, () => addFlow("files")) }), button("Add a folder", { icon: "folder", onclick: (e) => void busy1(e.currentTarget as HTMLButtonElement, () => addFlow("folder")) })),
     message,
+    cancelBar,
     h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", {}, "In the vault"), takeOut), listHolder),
   );
   await loadList();

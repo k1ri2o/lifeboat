@@ -7,7 +7,7 @@ use crate::security::{
     gate, pipe_client_is_admin, production_sddl, require_admin, Descriptor, RateLimiter, Refusal,
 };
 use crate::store::{self, Store};
-use lifeboat_core::config::{Config, PendingDelete, DELETE_DELAY_SECS};
+use lifeboat_core::config::{Config, PendingDelete, PendingVaultRemove, DELETE_DELAY_SECS};
 use lifeboat_core::disk::PrepareMode;
 use lifeboat_core::ipc::{FileEntry, Request, Response, SnapshotInfo, VaultItem, PIPE_NAME};
 use lifeboat_detect::FreezeState;
@@ -106,10 +106,18 @@ impl State {
             .filter(|d| !after.pending_deletes.iter().any(|a| a.id == d.id))
             .map(|d| d.id.clone())
             .collect();
+        let removed_vault: Vec<String> = before
+            .pending_vault_removes
+            .iter()
+            .filter(|d| !after.pending_vault_removes.iter().any(|a| a.path == d.path))
+            .map(|d| d.path.clone())
+            .collect();
         let _ = self.update(|c| {
             c.last_run = after.last_run;
             c.last_check = after.last_check.clone();
             c.pending_deletes.retain(|d| !removed.contains(&d.id));
+            c.pending_vault_removes
+                .retain(|d| !removed_vault.contains(&d.path));
         });
         out
     }
@@ -255,6 +263,7 @@ fn status(st: &State) -> Response {
         last_backup: last,
         last_check: cfg.last_check.clone(),
         pending_deletes: cfg.pending_deletes.clone(),
+        pending_vault_removes: cfg.pending_vault_removes.clone(),
     }
 }
 
@@ -752,6 +761,43 @@ fn vault_add(
     })
 }
 
+/// Size marker for a vault path that a rewrite has already removed.
+const GONE: u64 = u64::MAX;
+
+/// Match the paths the app sent to what the vault holds now, returning the vault's own spelling.
+/// Characters restic would read as a pattern are refused: the removal uses `--exclude`.
+fn vault_remove_targets(
+    c: &Config,
+    caches: &Caches,
+    paths: &[String],
+) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Err("nothing chosen to remove from the vault".into());
+    }
+    let Response::Vault { items } = vault_list(c, caches)? else {
+        return Err("cannot read the vault".into());
+    };
+    let mut out = Vec::new();
+    for p in paths {
+        let want = lifeboat_engine::to_restic_path(p);
+        let Some(item) = items
+            .iter()
+            .find(|i| lifeboat_engine::to_restic_path(&i.path).eq_ignore_ascii_case(&want))
+        else {
+            return Err(format!("{p} is not in the vault"));
+        };
+        if lifeboat_engine::has_pattern_chars(&item.path) {
+            return Err(format!(
+                "{p} has a * ? or [ in its name, which cannot be removed safely from the vault"
+            ));
+        }
+        if !out.contains(&item.path) {
+            out.push(item.path.clone());
+        }
+    }
+    Ok(out)
+}
+
 fn vault_list(c: &Config, caches: &Caches) -> Result<Response, String> {
     let e = engine(c)?;
     let mut seen = std::collections::HashSet::new();
@@ -764,6 +810,10 @@ fn vault_list(c: &Config, caches: &Caches) -> Result<Response, String> {
             }
             let (dir, size) = caches.size_of(&c.repo.to_string_lossy(), &s.id, &rp, || {
                 let nodes = e.ls(&s.id, &rp, true).map_err(|e| e.to_string())?;
+                if nodes.is_empty() {
+                    // Removed from this snapshot by a rewrite; its paths list is stale.
+                    return Ok((false, GONE));
+                }
                 Ok((
                     nodes
                         .iter()
@@ -771,12 +821,21 @@ fn vault_list(c: &Config, caches: &Caches) -> Result<Response, String> {
                     nodes.iter().filter(|n| !n.dir).map(|n| n.size).sum(),
                 ))
             })?;
+            if size == GONE {
+                continue;
+            }
+            let removes_at = c
+                .pending_vault_removes
+                .iter()
+                .find(|d| lifeboat_engine::to_restic_path(&d.path).eq_ignore_ascii_case(&rp))
+                .map(|d| d.due);
             items.push(VaultItem {
                 path: p.clone(),
                 dir,
                 size,
                 added: s.time.clone(),
                 snapshot: s.id.clone(),
+                removes_at,
             });
         }
     }
@@ -918,6 +977,38 @@ fn dispatch(
             }
             vault_extract(c, &st.ctx.caches, &paths, &target).unwrap_or_else(err)
         }),
+        Request::VaultRemove { password, paths } => {
+            let mut targets = Vec::new();
+            let checked = with_volume(st, &cfg, |c, _| {
+                if let Err(r) = password_gate(c, limiter, &password) {
+                    return refused(r);
+                }
+                match vault_remove_targets(c, &st.ctx.caches, &paths) {
+                    Ok(p) => {
+                        targets = p;
+                        Response::Done
+                    }
+                    Err(m) => err(m),
+                }
+            });
+            if !matches!(checked, Response::Done) {
+                return checked;
+            }
+            let paths = targets;
+            let due = now_unix() + DELETE_DELAY_SECS;
+            let r = st.update(|c| {
+                for path in paths {
+                    if !c.pending_vault_removes.iter().any(|d| d.path == path) {
+                        c.pending_vault_removes.push(PendingVaultRemove {
+                            path,
+                            snapshot: String::new(),
+                            due,
+                        });
+                    }
+                }
+            });
+            r.map(|_| Response::Done).unwrap_or_else(err)
+        }
         Request::ListDisks => match lifeboat_disk::list_disks() {
             Ok(disks) => Response::Disks { disks },
             Err(e) => err(e),
@@ -995,9 +1086,12 @@ fn dispatch(
             if !matches!(checked, Response::Done) {
                 return checked;
             }
-            st.update(|c| c.pending_deletes.clear())
-                .map(|_| Response::Done)
-                .unwrap_or_else(err)
+            st.update(|c| {
+                c.pending_deletes.clear();
+                c.pending_vault_removes.clear();
+            })
+            .map(|_| Response::Done)
+            .unwrap_or_else(err)
         }
         Request::Unfreeze { password } => {
             let checked = with_volume(st, &cfg, |c, _| {
@@ -1398,6 +1492,7 @@ mod tests {
         for line in [
             r#"{"cmd":"VaultAdd","paths":["C:/x"]}"#,
             r#"{"cmd":"VaultExtract","paths":[],"target":"C:/x"}"#,
+            r#"{"cmd":"VaultRemove","paths":["C:/x"]}"#,
             r#"{"cmd":"ListFiles"}"#,
         ] {
             assert!(
@@ -1410,6 +1505,7 @@ mod tests {
             r#"{"cmd":"VaultList"}"#,
             r#"{"cmd":"VaultAdd","password":"pw","paths":["C:/x"]}"#,
             r#"{"cmd":"VaultExtract","password":"pw","paths":["C:/x"],"target":"C:/y"}"#,
+            r#"{"cmd":"VaultRemove","password":"pw","paths":["C:/x"]}"#,
         ] {
             assert!(
                 message(call(line, &st, true)).contains("not configured"),
@@ -1684,6 +1780,81 @@ mod tests {
         let rm = format!(r#"{{"cmd":"SetFolders","folders":["{pb}"]}}"#);
         assert_eq!(message(call(&rm, &st, false)), "password wrong");
         assert_eq!(st.snapshot_cfg().folders.len(), 2);
+    }
+
+    #[test]
+    fn vault_remove_needs_the_password_and_queues_nothing_without_it() {
+        let d = tempfile::tempdir().unwrap();
+        let st = state_with(with_repo(), d.path());
+        let line = r#"{"cmd":"VaultRemove","password":"","paths":["C:/x"]}"#;
+        assert_eq!(message(call(line, &st, false)), "password wrong");
+        assert!(st.snapshot_cfg().pending_vault_removes.is_empty());
+    }
+
+    #[test]
+    fn vault_removal_that_ran_is_dropped_from_the_live_config() {
+        let d = tempfile::tempdir().unwrap();
+        let mk = |path: &str| PendingVaultRemove {
+            path: path.into(),
+            snapshot: String::new(),
+            due: 1,
+        };
+        let cfg = Config {
+            pending_vault_removes: vec![mk("C:/a"), mk("C:/b")],
+            ..with_repo()
+        };
+        let st = state_with(cfg.clone(), d.path());
+        // A removal queued while the cycle ran must survive the merge.
+        st.update(|c| c.pending_vault_removes.push(mk("C:/late")))
+            .unwrap();
+        struct Done;
+        impl Env for Done {
+            fn now(&self) -> u64 {
+                10
+            }
+            fn mount(&self) -> Result<cycle::Mount, String> {
+                Ok(cycle::Mount { disk: None })
+            }
+            fn offline(&self, _: u32) {}
+            fn scan(&self, _: u64) -> Result<lifeboat_detect::ChangeSet, String> {
+                Ok(Default::default())
+            }
+            fn backup(&self) -> Result<String, String> {
+                Ok("s".into())
+            }
+            fn latest_snapshot(&self) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            fn tag_pre_alert(&self, _: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn retention(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn check_subset(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn forget(&self, _: &[String]) -> Result<(), String> {
+                Ok(())
+            }
+            fn vault_remove(&self, path: &str) -> Result<(), String> {
+                if path == "C:/a" {
+                    Ok(())
+                } else {
+                    Err("busy".into())
+                }
+            }
+        }
+        st.cycle_with(&Done, cfg);
+        let left: Vec<String> = st
+            .snapshot_cfg()
+            .pending_vault_removes
+            .into_iter()
+            .map(|d| d.path)
+            .collect();
+        assert!(!left.contains(&"C:/a".to_string()), "{left:?}");
+        assert!(left.contains(&"C:/b".to_string()), "{left:?}");
+        assert!(left.contains(&"C:/late".to_string()), "{left:?}");
     }
 
     #[test]

@@ -55,6 +55,65 @@ pub trait Env {
     fn retention(&self) -> Result<(), String>;
     fn check_subset(&self) -> Result<(), String>;
     fn forget(&self, ids: &[String]) -> Result<(), String>;
+    /// Remove one item (Windows path) from the vault. Already gone counts as done.
+    fn vault_remove(&self, path: &str) -> Result<(), String>;
+}
+
+/// How a due vault removal is carried out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultAction {
+    /// The snapshot holds nothing else: forget it (and prune).
+    Forget,
+    /// Other items live in the snapshot: rewrite it without this one.
+    Rewrite,
+}
+
+/// Pick the action from the number of other items still in the snapshot.
+pub fn vault_action(other_items: usize) -> VaultAction {
+    if other_items == 0 {
+        VaultAction::Forget
+    } else {
+        VaultAction::Rewrite
+    }
+}
+
+/// Remove `path` from the vault for real. Only snapshots tagged `vault` are touched.
+fn vault_remove_item(e: &lifeboat_engine::Engine, path: &str) -> Result<(), String> {
+    use lifeboat_engine::{to_restic_path, VAULT_TAG};
+    let want = to_restic_path(path);
+    let mut snaps = e.snapshots().map_err(|e| e.to_string())?;
+    snaps.retain(|s| s.tags.iter().any(|t| t == VAULT_TAG));
+    snaps.sort_by(|a, b| b.time.cmp(&a.time));
+    let present = |id: &str, rp: &str| -> Result<bool, String> {
+        Ok(!e.ls(id, rp, false).map_err(|e| e.to_string())?.is_empty())
+    };
+    for s in &snaps {
+        let Some(rp) = s
+            .paths
+            .iter()
+            .map(|p| to_restic_path(p))
+            .find(|p| p.eq_ignore_ascii_case(&want))
+        else {
+            continue;
+        };
+        if !present(&s.id, &rp)? {
+            continue; // removed from this snapshot earlier
+        }
+        let mut others = 0;
+        for p in &s.paths {
+            let o = to_restic_path(p);
+            if o != rp && present(&s.id, &o)? {
+                others += 1;
+            }
+        }
+        // Every copy goes: an item added twice lives in more than one snapshot.
+        match vault_action(others) {
+            VaultAction::Forget => e.forget_snapshots(std::slice::from_ref(&s.id)),
+            VaultAction::Rewrite => e.rewrite_exclude(&s.id, &rp),
+        }
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +253,20 @@ pub fn run_cycle(env: &dyn Env, cfg: &mut Config, paths: &Paths) -> Outcome {
         match env.forget(&due) {
             Ok(()) => cfg.pending_deletes.retain(|d| !due.contains(&d.id)),
             Err(e) => notes.push(format!("delayed delete failed: {e}")),
+        }
+    }
+
+    // Delayed vault removals that are due, one at a time (a rewrite changes snapshot ids).
+    let due_paths: Vec<String> = cfg
+        .pending_vault_removes
+        .iter()
+        .filter(|d| d.due <= now)
+        .map(|d| d.path.clone())
+        .collect();
+    for path in due_paths {
+        match env.vault_remove(&path) {
+            Ok(()) => cfg.pending_vault_removes.retain(|d| d.path != path),
+            Err(e) => notes.push(format!("delayed vault removal failed: {e}")),
         }
     }
 
@@ -449,6 +522,13 @@ impl Env for RealEnv {
         self.ctx.caches.invalidate_all();
         r
     }
+
+    fn vault_remove(&self, path: &str) -> Result<(), String> {
+        let _w = self.ctx.write();
+        let r = vault_remove_item(&self.engine(), path);
+        self.ctx.caches.invalidate_all();
+        r
+    }
 }
 
 #[cfg(test)]
@@ -537,6 +617,10 @@ mod tests {
         }
         fn forget(&self, ids: &[String]) -> Result<(), String> {
             self.log(&format!("forget {}", ids.join(",")));
+            Ok(())
+        }
+        fn vault_remove(&self, path: &str) -> Result<(), String> {
+            self.log(&format!("vault_remove {path}"));
             Ok(())
         }
     }
@@ -702,6 +786,45 @@ mod tests {
         assert!(env.called("forget due"));
         assert_eq!(cfg.pending_deletes.len(), 1);
         assert_eq!(cfg.pending_deletes[0].id, "later");
+    }
+
+    #[test]
+    fn delayed_vault_removal_waits_until_due() {
+        use lifeboat_core::config::PendingVaultRemove;
+        let (_d, p) = setup();
+        let mk = |path: &str, due| PendingVaultRemove {
+            path: path.into(),
+            snapshot: "v1".into(),
+            due,
+        };
+        let mut cfg = Config {
+            pending_vault_removes: vec![mk("C:/a", 100), mk("C:/b", 5000)],
+            ..Config::default()
+        };
+        let env = Fake {
+            now: 50,
+            ..Default::default()
+        };
+        run_cycle(&env, &mut cfg, &p);
+        assert!(!env.called("vault_remove"), "not due yet");
+        assert_eq!(cfg.pending_vault_removes.len(), 2);
+
+        let env = Fake {
+            now: 200,
+            ..Default::default()
+        };
+        run_cycle(&env, &mut cfg, &p);
+        assert!(env.called("vault_remove C:/a"));
+        assert!(!env.called("vault_remove C:/b"));
+        assert_eq!(cfg.pending_vault_removes.len(), 1);
+        assert_eq!(cfg.pending_vault_removes[0].path, "C:/b");
+    }
+
+    #[test]
+    fn vault_removal_forgets_a_lone_item_and_rewrites_a_shared_snapshot() {
+        assert_eq!(vault_action(0), VaultAction::Forget);
+        assert_eq!(vault_action(1), VaultAction::Rewrite);
+        assert_eq!(vault_action(5), VaultAction::Rewrite);
     }
 
     #[test]

@@ -114,6 +114,20 @@ async fn delete_snapshots(password: String, ids: Vec<String>) -> Result<(), ApiE
     blocking(move || pipe::delete_snapshots(PIPE_NAME, &password, ids)).await
 }
 
+/// Queue vault items for removal. They go after the service's delay (7 days).
+#[tauri::command]
+async fn vault_remove(password: String, paths: Vec<String>) -> Result<(), ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other(
+            "Please type your Lifeboat password or recovery key.",
+        ));
+    }
+    if paths.is_empty() {
+        return Err(ApiError::other("Please choose something to remove."));
+    }
+    blocking(move || pipe::vault_remove(PIPE_NAME, &password, paths)).await
+}
+
 /// Cancel every queued delete.
 #[tauri::command]
 async fn cancel_delete(password: String) -> Result<(), ApiError> {
@@ -380,6 +394,7 @@ fn main() {
             restore,
             delete_snapshots,
             cancel_delete,
+            vault_remove,
             list_disks,
             prepare_disk,
             add_folder,

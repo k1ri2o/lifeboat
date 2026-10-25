@@ -1,7 +1,7 @@
 //! IPC protocol between the UI and the service: one JSON object per line over
 //! the named pipe [`PIPE_NAME`].
 
-use crate::config::{CheckResult, PendingDelete};
+use crate::config::{CheckResult, PendingDelete, PendingVaultRemove};
 use crate::disk::{DiskInfo, PrepareMode};
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +51,13 @@ pub enum Request {
         paths: Vec<String>,
         target: String,
     },
+    /// Queue the removal of vault items (`paths` are [`VaultItem::path`]s). Like
+    /// `DeleteSnapshots` it runs after a delay (7 days) and `CancelDelete` stops it. Needs the
+    /// `password`.
+    VaultRemove {
+        password: String,
+        paths: Vec<String>,
+    },
     /// List the disks the machine has.
     ListDisks,
     /// Create the hidden Lifeboat partition on `disk`. Dangerous: needs the repository
@@ -74,7 +81,7 @@ pub enum Request {
         password: String,
         ids: Vec<String>,
     },
-    /// Cancel every queued delete. Needs the password.
+    /// Cancel every queued delete and vault removal. Needs the password.
     CancelDelete {
         password: String,
     },
@@ -133,6 +140,9 @@ pub struct VaultItem {
     pub added: String,
     /// The vault snapshot that holds it.
     pub snapshot: String,
+    /// Unix seconds when a queued removal runs; `None` when none is queued.
+    #[serde(default)]
+    pub removes_at: Option<u64>,
 }
 
 /// The service's answer.
@@ -164,6 +174,8 @@ pub enum Response {
         last_check: Option<CheckResult>,
         #[serde(default)]
         pending_deletes: Vec<PendingDelete>,
+        #[serde(default)]
+        pending_vault_removes: Vec<PendingVaultRemove>,
     },
     /// A request without data finished.
     Done,
@@ -289,6 +301,11 @@ mod tests {
                 id: "x".into(),
                 due: 2,
             }],
+            pending_vault_removes: vec![PendingVaultRemove {
+                path: "C:/x".into(),
+                snapshot: "s".into(),
+                due: 3,
+            }],
         };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
@@ -322,6 +339,10 @@ mod tests {
             },
             Request::CancelDelete {
                 password: "p".into(),
+            },
+            Request::VaultRemove {
+                password: "p".into(),
+                paths: vec!["C:/x".into()],
             },
             Request::Unfreeze {
                 password: "p".into(),
