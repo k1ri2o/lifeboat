@@ -429,6 +429,8 @@ impl Env for RealEnv {
 
     fn latest_snapshot(&self) -> Result<Option<String>, String> {
         let mut v = self.engine().snapshots().map_err(|e| e.to_string())?;
+        // Vault snapshots are not backups of the watched folders.
+        v.retain(|s| !s.tags.iter().any(|t| t == lifeboat_engine::VAULT_TAG));
         v.sort_by(|a, b| a.time.cmp(&b.time));
         Ok(v.pop().map(|s| s.id))
     }
