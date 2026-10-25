@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote } from "./format";
+import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote, deleteDueDate, deleteConfirmText, pendingFor, deletesOnLine, longDate } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -149,5 +149,26 @@ describe("existing Lifeboat drive", () => {
     expect(madeOnNote("OLD-PC")).toBe("Made on OLD-PC");
     expect(madeOnNote("")).toBe("");
     expect(madeOnNote(undefined)).toBe("");
+  });
+});
+
+describe("delete helpers", () => {
+  const now = new Date(2026, 9, 25, 15, 0);
+  it("due date is 7 days ahead, across month ends", () => {
+    expect(longDate(deleteDueDate(now))).toBe("1 November 2026");
+    expect(longDate(deleteDueDate(new Date(2026, 11, 28)))).toBe("4 January 2027");
+  });
+  it("confirmation text names the date and the cancel window", () => {
+    expect(deleteConfirmText(now)).toBe("This backup will be deleted on 1 November 2026. You can cancel until then.");
+  });
+  it("finds a queued delete by id", () => {
+    const list = [{ id: "a", due: 1 }, { id: "b", due: 2 }];
+    expect(pendingFor(list, "b")?.due).toBe(2);
+    expect(pendingFor(list, "c")).toBeUndefined();
+    expect(pendingFor(undefined, "a")).toBeUndefined();
+  });
+  it("shows the due date of a queued delete", () => {
+    expect(deletesOnLine(new Date(2026, 10, 1, 12).getTime() / 1000)).toBe("Deletes on 1 November 2026");
+    expect(deletesOnLine(NaN)).toBe("Will be deleted soon");
   });
 });

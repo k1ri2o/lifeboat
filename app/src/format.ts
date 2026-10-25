@@ -207,3 +207,37 @@ export function madeOnNote(hostname: string | undefined): string {
   const h = (hostname ?? "").trim();
   return h ? `Made on ${h}` : "";
 }
+
+/** Days between asking for a delete and it running (matches the service). */
+export const DELETE_DELAY_DAYS = 7;
+
+/** "25 October 2026" for a date. */
+export function longDate(d: Date): string {
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+/** The date a delete asked for now will run. */
+export function deleteDueDate(now: Date = new Date()): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + DELETE_DELAY_DAYS);
+}
+
+/** The plain-words confirmation shown before a delete is queued. */
+export function deleteConfirmText(now: Date = new Date()): string {
+  return `This backup will be deleted on ${longDate(deleteDueDate(now))}. You can cancel until then.`;
+}
+
+export interface Pending {
+  id: string;
+  due: number;
+}
+
+/** The queued delete for backup `id`, or undefined. */
+export function pendingFor<T extends Pending>(pending: T[] | undefined, id: string): T | undefined {
+  return (pending ?? []).find((p) => p.id === id);
+}
+
+/** "Deletes on 1 November 2026" for a queued delete (`due` in unix seconds). */
+export function deletesOnLine(dueSecs: number): string {
+  const d = new Date(dueSecs * 1000);
+  return Number.isNaN(d.getTime()) ? "Will be deleted soon" : `Deletes on ${longDate(d)}`;
+}

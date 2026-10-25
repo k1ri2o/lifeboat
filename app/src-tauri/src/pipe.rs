@@ -2,6 +2,7 @@
 //!
 //! Every function takes the pipe name so tests can talk to a fake server.
 
+use lifeboat_core::config::PendingDelete;
 use lifeboat_core::disk::{DiskInfo, PrepareMode};
 use lifeboat_core::ipc::{client, FileEntry, Request, Response, SnapshotInfo, VaultItem};
 use serde::Serialize;
@@ -56,6 +57,8 @@ pub struct StatusInfo {
     pub frozen_since: Option<String>,
     /// Unix seconds of the last successful backup cycle.
     pub last_run: Option<u64>,
+    /// Backups queued for deletion (id and due time).
+    pub pending_deletes: Vec<PendingDelete>,
 }
 
 fn call(pipe: &str, req: &Request) -> Result<Response, ApiError> {
@@ -97,12 +100,14 @@ pub fn status(pipe: &str) -> Result<StatusInfo, ApiError> {
             frozen,
             frozen_since,
             last_run,
+            pending_deletes,
             ..
         } => Ok(StatusInfo {
             version,
             frozen,
             frozen_since,
             last_run,
+            pending_deletes,
         }),
         r => Err(unexpected(r)),
     }
@@ -139,6 +144,29 @@ pub fn restore(
     };
     match call(pipe, &req)? {
         Response::Restored { folder } => Ok(folder),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Queue backups for deletion; the service removes them after its delay (7 days).
+pub fn delete_snapshots(pipe: &str, password: &str, ids: Vec<String>) -> Result<(), ApiError> {
+    let req = Request::DeleteSnapshots {
+        password: password.to_string(),
+        ids,
+    };
+    match call(pipe, &req)? {
+        Response::Done => Ok(()),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Cancel every queued delete.
+pub fn cancel_delete(pipe: &str, password: &str) -> Result<(), ApiError> {
+    let req = Request::CancelDelete {
+        password: password.to_string(),
+    };
+    match call(pipe, &req)? {
+        Response::Done => Ok(()),
         r => Err(unexpected(r)),
     }
 }
@@ -313,10 +341,15 @@ mod tests {
                 last_run: Some(1_700_000_000),
                 last_backup: Some(1_700_000_000),
                 last_check: None,
-                pending_deletes: vec![],
+                pending_deletes: vec![PendingDelete {
+                    id: "abc".into(),
+                    due: 1_700_600_000,
+                }],
             }
         });
         let s = on_thread(move || status(&pipe)).await.unwrap();
+        assert_eq!(s.pending_deletes.len(), 1);
+        assert_eq!(s.pending_deletes[0].due, 1_700_600_000);
         assert_eq!(s.last_run, Some(1_700_000_000));
         assert!(s.frozen);
         assert_eq!(s.frozen_since.as_deref(), Some("2026-10-24T10:00:00Z"));
@@ -372,6 +405,40 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(folder, r"D:\Back");
+        h.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_snapshots_sends_ids_and_password() {
+        let (pipe, h) = fake_server("delete", 1, |req| match req {
+            Request::DeleteSnapshots { password, ids } => {
+                assert_eq!(password, "pw");
+                assert_eq!(ids, vec!["abc".to_string(), "def".to_string()]);
+                Response::Done
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+        on_thread(move || delete_snapshots(&pipe, "pw", vec!["abc".into(), "def".into()]))
+            .await
+            .unwrap();
+        h.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_delete_sends_password_and_shows_refusal() {
+        let (pipe, h) = fake_server("canceldel", 2, |req| match req {
+            Request::CancelDelete { password } if password == "pw" => Response::Done,
+            Request::CancelDelete { .. } => Response::Error {
+                message: "password wrong".into(),
+            },
+            other => panic!("unexpected {other:?}"),
+        });
+        let p2 = pipe.clone();
+        on_thread(move || cancel_delete(&pipe, "pw")).await.unwrap();
+        let err = on_thread(move || cancel_delete(&p2, "bad"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "That password is not right. Please try again.");
         h.await.unwrap();
     }
 
