@@ -1250,7 +1250,7 @@ function showRecoveryKey(body: HTMLElement, key: string) {
       "div",
       { id: "key-print", class: "card key-card" },
       h("h2", { class: "print-only" }, "Lifeboat recovery key"),
-      h("div", { class: "key", "aria-label": "Recovery key" }, ...groups.flatMap((g, i) => [i ? h("span", { class: "key-dash", "aria-hidden": "true" }, "-") : null, h("span", { class: "key-group" }, g)])),
+      h("div", { class: "key", "aria-label": "Recovery key" }, ...groups.map((g) => h("span", { class: "key-group" }, g))),
       h("p", { class: "print-only" }, "Keep this paper safe. Anyone who has this key can open your backups. Do not store it on this computer."),
     ),
     h("div", { class: "actions" }, button("Print this key", { icon: "printer", onclick: () => window.print() })),

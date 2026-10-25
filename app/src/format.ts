@@ -127,11 +127,6 @@ export function lastBackupLine(secs: number | null | undefined, now: Date = new 
   return `Last backup: ${relativeTime(new Date(secs * 1000).toISOString(), now)}`;
 }
 
-/** The recovery key as people should write it: groups joined with dashes (ABCDE-FGHIJ-...). */
-export function keyWithDashes(key: string, groups = 6): string {
-  return keyGroups(key, groups).join("-");
-}
-
 /** Whole percent (0-100) of a drive that is used; 0 when the numbers are missing. */
 export function usagePercent(used: number | null | undefined, total: number | null | undefined): number {
   if (used == null || !total || total <= 0) return 0;

@@ -226,7 +226,7 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; font: 13px
 .btn { border-radius: 8px; }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 
-/* Drives card (Settings) and dashes in the recovery key */
+/* Drives card (Settings) */
 .drives h2 { margin: 0 0 var(--s2); }
 .usage { margin-bottom: var(--s3); }
 .usage-title { font-weight: 600; margin: 0 0 6px; }
@@ -238,4 +238,3 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; font: 13px
 .disk-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s2); }
 .disk-row { display: flex; align-items: center; gap: var(--s2); }
 .disk-row .grow { display: flex; flex-direction: column; }
-.key-dash { align-self: center; opacity: .6; }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { folderParts, isStale, keyGroups, keyWithDashes, usagePercent, usageIsHigh, usageLine, busLabel, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote, deleteDueDate, deleteConfirmText, pendingFor, deletesOnLine, longDate, removesOnLine, vaultRemoveConfirmText, waitingDeletesTitle } from "./format";
+import { folderParts, isStale, keyGroups, usagePercent, usageIsHigh, usageLine, busLabel, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote, deleteDueDate, deleteConfirmText, pendingFor, deletesOnLine, longDate, removesOnLine, vaultRemoveConfirmText, waitingDeletesTitle } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -73,18 +73,6 @@ describe("keyGroups", () => {
   it("copes with empty and very short keys", () => {
     expect(keyGroups("")).toEqual([]);
     expect(keyGroups("AB")).toEqual(["A", "B"]);
-  });
-});
-
-describe("keyWithDashes", () => {
-  it("joins 6 groups of 5 with dashes", () => {
-    expect(keyWithDashes("ABCDEFGHJKMNPQRSTVWXYZ0123456789".slice(0, 30))).toBe("ABCDE-FGHJK-MNPQR-STVWX-YZ012-34567");
-  });
-  it("accepts a key that already has spaces or dashes", () => {
-    expect(keyWithDashes("ABCDE FGHJK-MNPQR STVWX YZ012 34567")).toBe("ABCDE-FGHJK-MNPQR-STVWX-YZ012-34567");
-  });
-  it("is empty for an empty key", () => {
-    expect(keyWithDashes("")).toBe("");
   });
 });
 

@@ -10,7 +10,6 @@ use crate::store::{self, Store};
 use lifeboat_core::config::{Config, PendingDelete, PendingVaultRemove, DELETE_DELAY_SECS};
 use lifeboat_core::disk::PrepareMode;
 use lifeboat_core::ipc::{FileEntry, Request, Response, SnapshotInfo, VaultItem, PIPE_NAME};
-use lifeboat_core::key::verify_forgiving;
 use lifeboat_detect::FreezeState;
 use lifeboat_engine::{Engine, Snapshot};
 use std::io;
@@ -142,30 +141,22 @@ fn engine(cfg: &Config) -> Result<Engine, String> {
     ))
 }
 
-/// Check `password` against the repository (`restic cat config`). A recovery key typed with
-/// spaces, lower case or look-alike letters is also tried in its exact form.
+/// Check `password` against the repository (`restic cat config`).
 fn verify_password(cfg: &Config, password: &str) -> Result<bool, String> {
-    Ok(accepted_password(cfg, password)?.is_some())
-}
-
-/// The string that opens the repository: `password` as typed, or its normalised recovery key.
-fn accepted_password(cfg: &Config, password: &str) -> Result<Option<String>, String> {
     if cfg.repo.as_os_str().is_empty() {
         return Err("backup repository is not configured".into());
     }
     if password.is_empty() {
-        return Ok(None);
+        return Ok(false);
     }
-    verify_forgiving(password, |p| {
-        Engine::new(
-            Engine::default_restic(),
-            cfg.repo.clone(),
-            p.to_string(),
-            cfg.folders.clone(),
-        )
-        .verify_password(p)
-        .map_err(|e| e.to_string())
-    })
+    Engine::new(
+        Engine::default_restic(),
+        cfg.repo.clone(),
+        password.to_string(),
+        cfg.folders.clone(),
+    )
+    .verify_password(password)
+    .map_err(|e| e.to_string())
 }
 
 /// Password gate for dangerous requests, using the repo from `cfg`.
@@ -464,34 +455,16 @@ fn init_repo(
         Err(e) => return err(e),
     };
     let repo = PathBuf::from(&volume.path).join("repo");
-    // Wrong guesses count against the same lockout as every other password check.
-    // A recovery key typed loosely opens an existing repository too; the exact form is saved.
-    let mut password = password;
-    let check = gate(limiter, Instant::now(), || {
-        let ok = verify_forgiving(&password, |p| {
-            Engine::new(
-                Engine::default_restic(),
-                repo.clone(),
-                p.to_string(),
-                folders.clone(),
-            )
-            .verify_password(p)
-            .map_err(|e| e.to_string())
-        })?;
-        match ok {
-            Some(p) => {
-                password = p;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    });
     let eng = Engine::new(
         Engine::default_restic(),
         repo.clone(),
         password.clone(),
         folders.clone(),
     );
+    // Wrong guesses count against the same lockout as every other password check.
+    let check = gate(limiter, Instant::now(), || {
+        eng.verify_password(&password).map_err(|e| e.to_string())
+    });
     let existing = match existing_repo(check) {
         Ok(e) => e,
         Err(m) if fresh && m == OTHER_PASSWORD => {
