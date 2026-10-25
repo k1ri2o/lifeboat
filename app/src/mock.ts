@@ -23,7 +23,7 @@ export async function installMock(mode: string): Promise<void> {
     { number: 1, model: "Samsung SSD 870", size: 1_000_000_000_000, bus_type: "SATA", is_boot: false, is_system: false, partitions: [] },
   ];
   let vault: { path: string; dir: boolean; size: number; added: string; snapshot: string }[] = [
-    { path: "C:\Users\Dad\Documents\Will.pdf", dir: false, size: 210 * 1024, added: iso(2000), snapshot: "v3" },
+    { path: "C:\\Users\\Dad\\Documents\\Will.pdf", dir: false, size: 210 * 1024, added: iso(2000), snapshot: "v3" },
   ];
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -31,6 +31,8 @@ export async function installMock(mode: string): Promise<void> {
     const a = (args ?? {}) as Record<string, unknown>;
     if (cmd.startsWith("plugin:event")) return 0;
     if (cmd === "plugin:dialog|open") return "C:\\Users\\Dad\\Desktop\\New folder";
+    // Realistic service latency (300-1500 ms; add ?lag=0 for none) so loading states and races show up.
+    await wait(new URLSearchParams(location.search).get("lag") === "0" ? 0 : 300 + Math.random() * 1200);
     if (mode === "error" && cmd === "home_state") {
       throw { kind: "not_running", message: "pipe not reachable: The system cannot find the file specified. (os error 2)" };
     }
@@ -38,17 +40,17 @@ export async function installMock(mode: string): Promise<void> {
       case "home_state":
         return { status: { version: "0.1.1", frozen: mode === "attack", frozen_since: attackAt, last_run: lastRun }, folders };
       case "backup_now":
-        await wait(1200);
+        await wait(1500);
         return null;
       case "list_snapshots":
         return versions;
       case "list_disks":
         return disks;
       case "prepare_disk":
-        await wait(800);
+        await wait(500);
         return "ok";
       case "init_repo":
-        await wait(800);
+        await wait(500);
         return "ABCD1234EFGH5678JKLM9012NPQR3456STUV7890WXYZ2345";
       case "add_folder":
         folders = [...folders, String(a.folder)];
@@ -59,10 +61,9 @@ export async function installMock(mode: string): Promise<void> {
         return folders;
       case "restore":
         if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
-        await wait(800);
+        await wait(500);
         return String(a.target);
       case "list_files": {
-        await wait(400);
         const base = a.path ? String(a.path).replace(/[\/]+$/, "") : "";
         // Same shape as the service: restic paths (/C/Users/Dad/Documents), display name in Windows form for top folders.
         const e = (name: string, dir: boolean, size: number) => ({
@@ -77,14 +78,14 @@ export async function installMock(mode: string): Promise<void> {
       }
       case "vault_add":
         if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
-        await wait(800);
+        await wait(500);
         vault = [...vault, ...(a.paths as string[]).map((p) => ({ path: p, dir: false, size: 120 * 1024, added: iso(1), snapshot: "v0" }))];
         return (a.paths as string[]).length;
       case "vault_list":
         return vault;
       case "vault_extract":
         if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
-        await wait(800);
+        await wait(500);
         return String(a.target);
       case "open_folder":
         return null;

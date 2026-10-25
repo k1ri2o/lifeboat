@@ -40,6 +40,10 @@ const PATHS = {
   vault: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5V10M12 14v1.5M8.5 12H10M14 12h1.5"/>',
   chevron: '<path d="M9 6l6 6-6 6"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.1"/>',
+  image: '<rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="M5 17l5-4 3 3 2-2 4 3"/>',
+  doc: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M10 12h5M10 15.5h5"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  arrowLeft: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
 } as const;
 
 export type IconName = keyof typeof PATHS;
@@ -100,4 +104,28 @@ export function errorBox(e: unknown, onRetry?: () => void): HTMLElement {
     ),
   );
   return box;
+}
+
+/** Icon that fits a file by its extension. */
+export function fileIcon(name: string, size = 20): HTMLElement {
+  const ext = (name.split(".").pop() ?? "").toLowerCase();
+  if (/^(jpe?g|png|gif|bmp|webp|heic|tiff?)$/.test(ext)) return icon("image", size);
+  if (/^(docx?|pdf|txt|rtf|odt|xlsx?|pptx?)$/.test(ext)) return icon("doc", size);
+  return icon("file", size);
+}
+
+/** Grey shimmering placeholder rows shown while a panel loads. */
+export function skeleton(rows = 3): HTMLElement {
+  return h(
+    "div",
+    { class: "skeleton", "aria-hidden": "true" },
+    ...Array.from({ length: rows }, (_, i) => h("div", { class: "sk-row" }, h("span", { class: "sk sk-ic" }), h("span", { class: "sk sk-line", style: `width:${70 - ((i * 13) % 30)}%` }))),
+  );
+}
+
+/** Replace `host`'s only child with `next` unless it renders to the same HTML (no flicker, no lost focus). */
+export function patch(host: HTMLElement, next: HTMLElement): void {
+  const cur = host.firstElementChild as HTMLElement | null;
+  if (cur && host.childElementCount === 1 && cur.outerHTML === next.outerHTML) return;
+  host.replaceChildren(next);
 }
