@@ -1,12 +1,18 @@
 import "./style.css";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { api, toApiError, type Disk, type HomeState, type Snapshot as Version } from "./api";
+import { desktopDir, join } from "@tauri-apps/api/path";
+import { api, toApiError, type Disk, type FileEntry, type HomeState, type Snapshot as Version } from "./api";
 import {
   folderParts,
   isStale,
   keyGroups,
-  lastBackupLine,
+  lastBackupStamp,
+  versionCountLine,
+  smallSize,
+  plainDate,
+  baseName,
+  restoreFolderName,
   lastBefore,
   nextBackupLine,
   relativeTime,
@@ -14,9 +20,9 @@ import {
   snapshotLabel,
   inlineTimeLabel,
 } from "./format";
-import { button, errorBox, h, icon, type Child } from "./ui";
+import { adminButton, button, errorBox, h, icon, spinner, type Child } from "./ui";
 
-type Screen = "home" | "restore" | "settings" | "setup";
+type Screen = "home" | "restore" | "vault" | "settings" | "setup";
 let screen: Screen = "home";
 /** Version to preselect on the Restore screen (set by the "Restore files from before..." button). */
 let preselect: string | undefined;
@@ -34,7 +40,7 @@ function go(s: Screen) {
 
 function shell(body: HTMLElement, withNav: boolean): HTMLElement {
   const brand = h("div", { class: "brand" }, icon("lifebuoy", 26), h("span", {}, "Lifeboat"));
-  const item = (s: Screen, label: string, ic: "home" | "restore" | "settings") =>
+  const item = (s: Screen, label: string, ic: "home" | "restore" | "vault" | "settings") =>
     h(
       "button",
       { type: "button", class: "nav-item", "aria-current": screen === s ? "page" : "false", onclick: () => go(s) },
@@ -42,7 +48,7 @@ function shell(body: HTMLElement, withNav: boolean): HTMLElement {
       h("span", {}, label),
     );
   const nav = withNav
-    ? h("nav", { "aria-label": "Main" }, item("home", "Home", "home"), item("restore", "Restore", "restore"), item("settings", "Settings", "settings"))
+    ? h("nav", { "aria-label": "Main" }, item("home", "Home", "home"), item("restore", "Restore", "restore"), item("vault", "Vault", "vault"), item("settings", "Settings", "settings"))
     : null;
   return h("div", { class: "shell" }, h("header", {}, brand, nav), h("main", { id: "main" }, body));
 }
@@ -64,6 +70,7 @@ async function render() {
     }
     if (screen === "home") renderHome(body, st);
     else if (screen === "restore") await renderRestore(body, st);
+    else if (screen === "vault") await renderVault(body);
     else renderSettings(body, st);
   } catch (e) {
     body.replaceChildren(pageTitle("Lifeboat"), errorBox(toApiError(e), () => void render()));
@@ -159,6 +166,25 @@ function renderHome(body: HTMLElement, st: HomeState) {
     }
   });
 
+  // Saved versions count and a shortcut into the newest one.
+  const versions = h("div", { class: "muted", "aria-live": "polite" }, spinner("Counting saved versions..."));
+  const seeBtn = button("See what's backed up", {
+    icon: "folder",
+    onclick: async () => {
+      try {
+        const snaps = await api.snapshots();
+        preselect = [...snaps].sort((a, b) => b.time.localeCompare(a.time))[0]?.id;
+        go("restore");
+      } catch (e) {
+        message.replaceChildren(errorBox(e));
+      }
+    },
+  });
+  void api
+    .snapshots()
+    .then((snaps) => versions.replaceChildren(document.createTextNode(snaps.length ? versionCountLine(snaps.length) : "No saved versions yet")))
+    .catch(() => versions.replaceChildren());
+
   let card: HTMLElement;
   if (health === "paused") {
     const since = status.frozen_since;
@@ -228,8 +254,9 @@ function renderHome(body: HTMLElement, st: HomeState) {
         "div",
         { class: "status-text" },
         h("h1", {}, "Your files are protected"),
-        h("p", { class: "facts" }, h("span", {}, lastBackupLine(status.last_run)), h("span", {}, nextBackupLine(status.last_run))),
-        h("div", { class: "actions" }, backupBtn),
+        h("p", { class: "facts" }, h("span", {}, lastBackupStamp(status.last_run)), h("span", {}, nextBackupLine(status.last_run))),
+        versions,
+        h("div", { class: "actions" }, backupBtn, seeBtn),
         busy,
       ),
     );
@@ -265,7 +292,14 @@ function renderHome(body: HTMLElement, st: HomeState) {
       "section",
       { class: "section" },
       h("div", { class: "section-head" }, h("h2", {}, "Folders we protect"), add),
+      h("p", { class: "muted" }, "Backed up: stays on your PC, and a copy is in the safe."),
       h("div", { class: "card flush" }, list),
+    ),
+    h(
+      "section",
+      { class: "section" },
+      h("div", { class: "section-head" }, h("h2", {}, "Vault"), button("Open the vault", { icon: "vault", onclick: () => go("vault") })),
+      h("p", { class: "muted" }, "Vault: only in the safe. Files you put there are taken off your PC."),
     ),
   );
 }
@@ -279,63 +313,243 @@ function confirmRemove(folder: string, draw: (folders: string[]) => void): void 
   );
 }
 
+// ---------- Small shared pieces ----------
+
+/** A plain yes/no dialog with a body. Calls `onOk` after it closes. */
+function confirmDialog(title: string, content: Child, okLabel: string, onOk: () => void): void {
+  const ok = button(okLabel, { cls: "primary" });
+  const cancel = button("Cancel");
+  const box = h(
+    "div",
+    { class: "dialog", role: "dialog", "aria-modal": "true", "aria-label": title },
+    h("h2", {}, title),
+    content,
+    h("div", { class: "actions" }, ok, cancel),
+  );
+  const overlay = h("div", { class: "overlay" }, box);
+  const close = () => overlay.remove();
+  ok.addEventListener("click", () => {
+    close();
+    onOk();
+  });
+  cancel.addEventListener("click", close);
+  overlay.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Escape") close();
+  });
+  document.body.append(overlay);
+  ok.focus();
+}
+
+/** Green "done" box with an "Open folder" button. */
+function doneBox(title: string, text: string, folder: string): HTMLElement {
+  const msg = h("div", { "aria-live": "polite" });
+  return h(
+    "div",
+    { class: "notice good" },
+    icon("check", 22),
+    h(
+      "div",
+      { class: "notice-body" },
+      h("p", { class: "notice-title" }, title),
+      h("p", { class: "muted" }, text),
+      h(
+        "div",
+        { class: "actions" },
+        button("Open folder", {
+          icon: "folder",
+          cls: "primary",
+          onclick: async () => {
+            msg.replaceChildren();
+            try {
+              await api.openFolder(folder);
+            } catch (e) {
+              msg.replaceChildren(errorBox(e));
+            }
+          },
+        }),
+      ),
+      msg,
+    ),
+  );
+}
+
+/** A new folder on the Desktop named "Lifeboat restore <date>", or "" if Windows will not say where the Desktop is. */
+async function defaultRestoreTarget(): Promise<string> {
+  try {
+    const p = await join(await desktopDir(), restoreFolderName());
+    return typeof p === "string" ? p : "";
+  } catch {
+    return "";
+  }
+}
+
+/** True when `path` sits inside one of the chosen folders. */
+function insideChosen(path: string, chosen: Iterable<string>): boolean {
+  for (const c of chosen) {
+    if (c !== path && path.startsWith(c) && /[\\/]/.test(path.charAt(c.length))) return true;
+  }
+  return false;
+}
+
 // ---------- Restore ----------
 
 async function renderRestore(body: HTMLElement, home: HomeState) {
-  const versions: Version[] = [...(await api.snapshots())].sort((a, b) => b.time.localeCompare(a.time));
   body.append(pageTitle("Restore your files", "Go back to how your files looked at an earlier time."));
+  const loading = spinner("Looking for your saved versions...");
+  body.append(loading);
+  const versions: Version[] = [...(await api.snapshots())].sort((a, b) => b.time.localeCompare(a.time));
+  const defaultTarget = await defaultRestoreTarget();
+  loading.remove();
   if (!versions.length) {
     body.append(h("div", { class: "card empty-state" }, icon("restore", 32), h("p", {}, "There is nothing to restore yet. Once your first backup is done, it will show up here.")));
     return;
   }
   const frozenSince = home.status.frozen ? home.status.frozen_since : null;
   const safe = frozenSince ? lastBefore(versions, frozenSince) : undefined;
-  let chosen: string | undefined = preselect ?? safe?.id ?? versions[0].id;
+  let chosen: string = preselect && versions.some((v) => v.id === preselect) ? preselect : (safe?.id ?? versions[0].id);
   preselect = undefined;
   let showAll = false;
-  let target = "";
+  let target = defaultTarget;
+  const label = (id: string) => {
+    const v = versions.find((x) => x.id === id);
+    return v ? snapshotLabel(v.time) : "";
+  };
+
+  // What is picked inside the version. A chosen folder includes everything in it.
+  const sel = new Map<string, FileEntry>();
+  let trail: { name: string; path?: string }[] = [{ name: "All files" }];
+  let token = 0;
 
   const result = h("div", { role: "status", "aria-live": "polite" });
-  const targetText = h("span", { class: "muted" }, "No folder chosen yet");
-  const pw = h("input", { type: "password", id: "pw", autocomplete: "off" }) as HTMLInputElement;
-  const go1 = button("Restore my files", { cls: "primary big", icon: "restore" });
+  const targetText = h("span", {}, target || "No folder chosen yet");
+  if (!target) targetText.className = "muted";
+  const goBtn = button("Restore everything in this version", { cls: "primary big", icon: "restore" });
+  const summary = h("p", { class: "muted small", role: "status", "aria-live": "polite" });
+  const crumbBar = h("nav", { class: "crumbs", "aria-label": "Where you are" });
+  const fileList = h("ul", { class: "file-list" });
+
+  const updateSummary = () => {
+    const n = sel.size;
+    summary.textContent = n ? `${n} ${n === 1 ? "item" : "items"} chosen. A folder you choose includes everything inside it.` : "Nothing chosen yet. Tick the files or folders you want, or restore everything.";
+    goBtn.querySelector("span")!.textContent = n ? `Restore the ${n} chosen ${n === 1 ? "item" : "items"}` : "Restore everything in this version";
+  };
+
+  const drawCrumbs = () => {
+    crumbBar.replaceChildren(
+      ...trail.flatMap((c, i) => {
+        const last = i === trail.length - 1;
+        const part = last
+          ? h("span", { class: "crumb current", "aria-current": "page" }, c.name)
+          : h(
+              "button",
+              {
+                type: "button",
+                class: "crumb link",
+                onclick: () => {
+                  trail = trail.slice(0, i + 1);
+                  void loadLevel();
+                },
+              },
+              c.name,
+            );
+        return i === 0 ? [part] : [icon("chevron", 14), part];
+      }),
+    );
+  };
+
+  const drawFiles = (items: FileEntry[]) => {
+    if (!items.length) return fileList.replaceChildren(h("li", { class: "muted empty" }, "This folder is empty."));
+    fileList.replaceChildren(
+      ...items.map((f, i) => {
+        const covered = insideChosen(f.path, sel.keys());
+        const cb = h("input", { type: "checkbox", id: `f-${i}`, checked: sel.has(f.path) || covered, disabled: covered, "aria-label": `Choose ${f.name}` }) as HTMLInputElement;
+        cb.addEventListener("change", () => {
+          if (cb.checked) sel.set(f.path, f);
+          else sel.delete(f.path);
+          updateSummary();
+          drawFiles(items);
+        });
+        const name = f.dir
+          ? h(
+              "button",
+              {
+                type: "button",
+                class: "link file-name",
+                title: `Open ${f.name}`,
+                onclick: () => {
+                  trail = [...trail, { name: f.name, path: f.path }];
+                  void loadLevel();
+                },
+              },
+              f.name,
+            )
+          : h("span", { class: "file-name" }, f.name);
+        const when = plainDate(f.mtime);
+        return h(
+          "li",
+          { class: `file-row${covered ? " covered" : ""}`, title: covered ? "Included because the folder around it is chosen" : "" },
+          cb,
+          icon(f.dir ? "folder" : "file", 20),
+          h("div", { class: "grow" }, name),
+          h("span", { class: "muted small file-meta" }, f.dir ? "Folder" : smallSize(f.size)),
+          h("span", { class: "muted small file-meta" }, when),
+        );
+      }),
+    );
+  };
+
+  const loadLevel = async () => {
+    const mine = ++token;
+    drawCrumbs();
+    fileList.replaceChildren(h("li", {}, spinner("Opening...")));
+    try {
+      const items = [...(await api.listFiles(chosen, trail[trail.length - 1].path))].sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+      if (mine === token) drawFiles(items);
+    } catch (e) {
+      if (mine === token) fileList.replaceChildren(h("li", {}, errorBox(e, () => void loadLevel())));
+    }
+  };
+
+  const pickVersion = (id: string) => {
+    chosen = id;
+    sel.clear();
+    trail = [{ name: "All files" }];
+    result.replaceChildren();
+    drawVersions();
+    updateSummary();
+    void loadLevel();
+  };
 
   const list = h("div", { class: "choices", role: "radiogroup", "aria-label": "Backup times" });
-  const draw = () => {
+  const drawVersions = () => {
     const shown = showAll ? versions : versions.slice(0, 8);
     list.replaceChildren(
       ...shown.map((v) => {
         const isSafe = safe?.id === v.id;
         const radio = h("input", { type: "radio", name: "ver", id: `v-${v.id}`, checked: v.id === chosen });
-        radio.addEventListener("change", () => {
-          chosen = v.id;
-          draw();
-        });
+        radio.addEventListener("change", () => pickVersion(v.id));
         return h(
           "label",
           { class: `choice${v.id === chosen ? " selected" : ""}`, for: `v-${v.id}` },
           radio,
-          h(
-            "span",
-            { class: "grow" },
-            h("span", { class: "choice-title" }, snapshotLabel(v.time)),
-            h("span", { class: "muted small" }, relativeTime(v.time)),
-          ),
+          h("span", { class: "grow" }, h("span", { class: "choice-title" }, snapshotLabel(v.time)), h("span", { class: "muted small" }, relativeTime(v.time))),
           isSafe ? h("span", { class: "pill ok" }, "Last good copy") : null,
         );
       }),
-      !showAll && versions.length > 8 ? button(`Show ${versions.length - 8} older`, { cls: "quiet", onclick: () => ((showAll = true), draw()) }) : "",
+      !showAll && versions.length > 8 ? button(`Show ${versions.length - 8} older`, { cls: "quiet", onclick: () => ((showAll = true), drawVersions()) }) : "",
     );
   };
-  draw();
+  drawVersions();
+  updateSummary();
 
   body.append(
     frozenSince && safe
       ? h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Backups are paused"), h("p", { class: "muted" }, `We picked the last good copy, from ${inlineTimeLabel(safe.time)}, before the problem started.`)))
       : "",
     step(1, "Pick a time", "Choose how far back to go.", list),
+    step(2, "Choose what to bring back", "Open folders to look inside. Tick what you want, or leave everything unticked to restore the whole version.", h("div", {}, crumbBar, h("div", { class: "card flush browser" }, fileList), summary)),
     step(
-      2,
+      3,
       "Choose where the files go",
       "Your files are copied into a new, empty folder. Nothing on your computer is replaced or deleted.",
       h(
@@ -343,7 +557,7 @@ async function renderRestore(body: HTMLElement, home: HomeState) {
         { class: "target-row" },
         icon("folder", 22),
         h("div", { class: "grow" }, targetText),
-        button("Choose a folder", {
+        button(target ? "Choose another folder" : "Choose a folder", {
           onclick: async () => {
             const picked = await pickFolder("Choose a new, empty folder");
             if (picked) {
@@ -355,31 +569,132 @@ async function renderRestore(body: HTMLElement, home: HomeState) {
         }),
       ),
     ),
-    step(3, "Type your password", "This makes sure it is really you.", h("div", {}, h("label", { for: "pw", class: "sr-only" }, "Your Lifeboat password"), pw)),
-    h("div", { class: "actions" }, go1),
+    h("div", { class: "actions" }, goBtn),
     result,
   );
+  void loadLevel();
 
-  go1.addEventListener("click", async () => {
-    if (!chosen) return;
+  goBtn.addEventListener("click", () => {
     if (!target) return void result.replaceChildren(errorBox({ kind: "other", message: "Please choose a folder for your files first." }));
-    go1.disabled = true;
-    result.replaceChildren(h("p", { class: "busy-note" }, "Getting your files back. This can take a while..."));
-    try {
-      await api.restore(chosen, target, pw.value);
-      pw.value = "";
-      result.replaceChildren(
-        h("div", { class: "notice good" }, icon("check", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Your files are back"), h("p", { class: "muted" }, `You can find them in ${target}`))),
-      );
-    } catch (e) {
-      result.replaceChildren(errorBox(e));
-    }
-    go1.disabled = false;
+    result.replaceChildren();
+    const paths = [...sel.keys()];
+    askPassword(
+      paths.length ? "Restore the chosen files" : "Restore everything",
+      `Files from ${label(chosen)} will be copied into ${target}. Type your password so we know it is you.`,
+      async (password) => {
+        const out = await api.restore(chosen, target, password, paths);
+        const where = out || target;
+        body.replaceChildren(
+          pageTitle("Your files are back"),
+          doneBox("Done", `Your files from ${label(chosen)} are in ${where}`, where),
+          h("div", { class: "actions" }, button("Back to Home", { onclick: () => go("home") })),
+        );
+      },
+    );
   });
 }
 
 function step(n: number, title: string, hint: string, content: Child): HTMLElement {
   return h("section", { class: "section" }, h("h2", {}, h("span", { class: "num" }, String(n)), title), h("p", { class: "muted" }, hint), content);
+}
+
+// ---------- Vault ----------
+
+async function renderVault(body: HTMLElement) {
+  const message = h("div", { "aria-live": "polite" });
+  const listHolder = h("div", { class: "card flush" });
+  const chosen = new Set<string>();
+  const takeOut = button("Take out", { cls: "primary", icon: "restore" });
+  takeOut.disabled = true;
+
+  const updateTakeOut = () => {
+    takeOut.disabled = chosen.size === 0;
+    takeOut.querySelector("span")!.textContent = chosen.size ? `Take out ${chosen.size} ${chosen.size === 1 ? "item" : "items"}` : "Take out";
+  };
+
+  const loadList = async () => {
+    chosen.clear();
+    updateTakeOut();
+    listHolder.replaceChildren(spinner("Opening the vault..."));
+    try {
+      const items = [...(await api.vaultList())].sort((a, b) => b.added.localeCompare(a.added));
+      if (!items.length) return listHolder.replaceChildren(h("p", { class: "muted empty" }, "The vault is empty. Add files or a folder to keep them only in the safe."));
+      listHolder.replaceChildren(
+        h(
+          "ul",
+          { class: "file-list" },
+          ...items.map((it, i) => {
+            const cb = h("input", { type: "checkbox", id: `vi-${i}`, "aria-label": `Choose ${baseName(it.path)}` }) as HTMLInputElement;
+            cb.addEventListener("change", () => {
+              if (cb.checked) chosen.add(it.path);
+              else chosen.delete(it.path);
+              updateTakeOut();
+            });
+            const p = folderParts(it.path);
+            return h(
+              "li",
+              { class: "file-row" },
+              cb,
+              icon(it.dir ? "folder" : "file", 20),
+              h("div", { class: "grow" }, h("div", { class: "file-name" }, p.name), p.where ? h("div", { class: "muted small", title: it.path }, p.where) : null),
+              h("span", { class: "muted small file-meta" }, it.dir ? "Folder" : smallSize(it.size)),
+              h("span", { class: "muted small file-meta" }, it.added ? `Added ${plainDate(it.added)}` : ""),
+            );
+          }),
+        ),
+      );
+    } catch (e) {
+      listHolder.replaceChildren(errorBox(e, () => void loadLevelAgain()));
+    }
+  };
+  const loadLevelAgain = () => loadList();
+
+  const addFlow = async (kind: "files" | "folder") => {
+    message.replaceChildren();
+    const r = kind === "files" ? await open({ multiple: true, directory: false, title: "Choose files for the vault" }) : await open({ multiple: false, directory: true, title: "Choose a folder for the vault" });
+    const picked: string[] = Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
+    if (!picked.length) return;
+    confirmDialog(
+      "Move this into the vault?",
+      h(
+        "div",
+        {},
+        h("p", { class: "muted" }, "These will be copied into Lifeboat's safe. After Lifeboat has checked the safe copy, they are removed from your PC."),
+        h("ul", { class: "plain-list" }, ...picked.slice(0, 12).map((p) => h("li", {}, h("strong", {}, baseName(p)), h("span", { class: "muted small", title: p }, ` ${folderParts(p).where}`)))),
+        picked.length > 12 ? h("p", { class: "muted small" }, `and ${picked.length - 12} more`) : null,
+      ),
+      "Move to the vault",
+      () =>
+        askPassword("Move to the vault", "Type your password so we know it is you.", async (password) => {
+          const n = await api.vaultAdd(password, picked);
+          message.replaceChildren(h("div", { class: "notice good" }, icon("check", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, n === 1 ? "1 item is now in the vault" : `${n} items are now in the vault`), h("p", { class: "muted" }, "Lifeboat checked the safe copy and removed the originals from your PC."))));
+          void loadList();
+        }),
+    );
+  };
+
+  takeOut.addEventListener("click", async () => {
+    message.replaceChildren();
+    const folder = await pickFolder("Choose a new, empty folder to put the files in");
+    if (!folder) return;
+    const paths = [...chosen];
+    askPassword("Take files out of the vault", `They will be copied into ${folder}. Type your password so we know it is you.`, async (password) => {
+      const out = await api.vaultExtract(password, paths, folder);
+      const where = out || folder;
+      message.replaceChildren(doneBox("Your files are out of the vault", `They are in ${where}`, where));
+      void loadList();
+    });
+  });
+
+  body.append(
+    pageTitle("Vault", "A private place for files you want off this PC."),
+    h("div", { class: "notice info" }, icon("vault", 22), h("div", { class: "notice-body" }, h("p", {}, "Files in the vault are kept only inside Lifeboat's hidden safe. They are removed from your PC after Lifeboat has checked the safe copy. If you forget the password and lose the recovery key, they are gone."))),
+    h("p", { class: "muted" }, "Backed up: stays on your PC, a copy is in the safe. Vault: only in the safe."),
+    h("div", { class: "actions" }, button("Add files", { icon: "file", cls: "primary", onclick: () => void addFlow("files") }), button("Add a folder", { icon: "folder", onclick: () => void addFlow("folder") })),
+    message,
+    h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", {}, "In the vault"), takeOut), listHolder),
+  );
+  await loadList();
 }
 
 // ---------- Settings ----------
@@ -440,9 +755,32 @@ function stepper(current: number): HTMLElement {
   );
 }
 
+/** Shown at the top of every setup step when Lifeboat is not running as administrator. */
+function adminBanner(): HTMLElement {
+  return h(
+    "div",
+    { class: "notice warn" },
+    icon("shield", 22),
+    h(
+      "div",
+      { class: "notice-body" },
+      h("p", { class: "notice-title" }, "Setup needs administrator rights"),
+      h("p", { class: "muted" }, "Lifeboat has to hide the backup drive from other programs, and Windows only allows that for an administrator. Press the button and choose Yes when Windows asks."),
+      adminButton(),
+    ),
+  );
+}
+
 async function renderSetup(body: HTMLElement) {
+  let admin = true;
+  try {
+    admin = await api.isAdmin();
+  } catch {
+    // If we cannot tell, do not nag.
+  }
   const draw = () => {
     body.replaceChildren();
+    if (!admin) body.append(adminBanner());
     if (wiz.step === 1) return void drawStep1(body, draw);
     if (wiz.step === 2) return drawStep2(body, draw);
     drawStep3(body, draw);
@@ -456,7 +794,7 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
     stepper(1),
     pageTitle("Where should your backups go?", "Lifeboat keeps your backups on a hidden part of a drive, where viruses and ransomware cannot reach them."),
   );
-  const holder = h("div", { class: "section" }, h("p", { class: "muted" }, "Looking for drives..."));
+  const holder = h("div", { class: "section" }, spinner("Looking for drives..."));
   body.append(holder);
   let disks: Disk[];
   try {
@@ -631,7 +969,6 @@ function drawStep3(body: HTMLElement, redraw: () => void) {
     stepper(3),
     pageTitle("Choose a password", "You will need it to get your files back or to change your protection. Pick something you will remember, and write it down."),
     h("div", { class: "card form" }, h("label", { for: "spw" }, "Password (at least 8 characters)"), pw, h("label", { for: "spw2" }, "Type it again"), pw2),
-    h("div", { class: "notice info" }, icon("shield", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Windows will ask for permission"), h("p", { class: "muted" }, "To hide the backup drive from other programs, Lifeboat needs administrator rights. When the next window asks \"Do you want to allow this app to make changes?\", choose Yes."))),
     msg,
     progress,
     h("div", { class: "actions split" }, back, go1),

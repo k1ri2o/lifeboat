@@ -16,14 +16,40 @@ pub enum Request {
     Status,
     /// Back up all configured folders now.
     Backup,
+    /// Normal backup snapshots (vault snapshots are left out; see [`Request::VaultList`]).
     ListSnapshots,
-    /// Restore a snapshot (or only `path` from it) into the new folder `target`.
-    /// Dangerous: needs the repository `password`.
+    /// One folder level of a snapshot. `path` is an [`FileEntry::path`] from an earlier
+    /// reply; `None` lists the snapshot's backed-up top folders. No password: names only.
+    ListFiles {
+        snapshot: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Restore `paths` (each a [`FileEntry::path`]; empty = whole snapshot) from `snapshot`
+    /// into the folder `target` (new or empty). Each item lands directly in `target` under its
+    /// own name, not under its full original path. Dangerous: needs the repository `password`.
     Restore {
         password: String,
         snapshot: String,
         target: String,
-        path: Option<String>,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
+    /// Vault mode: move `paths` (files or folders) into the safe. The service backs them up
+    /// as a snapshot tagged `vault`, checks every file is in it with the right size, and only
+    /// then deletes the originals. Refused while frozen. Needs the `password`.
+    VaultAdd {
+        password: String,
+        paths: Vec<String>,
+    },
+    /// What is kept only in the vault.
+    VaultList,
+    /// Copy vault items (`paths` are [`VaultItem::path`]s) out into the folder `target`
+    /// (new or empty). The vault copy stays. Needs the `password`.
+    VaultExtract {
+        password: String,
+        paths: Vec<String>,
+        target: String,
     },
     /// List the disks the machine has.
     ListDisks,
@@ -73,6 +99,35 @@ pub struct SnapshotInfo {
     pub paths: Vec<String>,
 }
 
+/// One entry of a snapshot folder listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEntry {
+    /// Path inside the snapshot, passed back in `ListFiles`/`Restore`.
+    pub path: String,
+    /// Display name (for a top folder: its Windows path, e.g. `C:\Users\Dad\Documents`).
+    pub name: String,
+    pub dir: bool,
+    #[serde(default)]
+    pub size: u64,
+    /// Last change time (RFC 3339).
+    #[serde(default)]
+    pub mtime: String,
+}
+
+/// A file or folder kept only in the vault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultItem {
+    /// Original Windows path; also the id passed to `VaultExtract`.
+    pub path: String,
+    pub dir: bool,
+    /// Total bytes.
+    pub size: u64,
+    /// When it was moved in (RFC 3339).
+    pub added: String,
+    /// The vault snapshot that holds it.
+    pub snapshot: String,
+}
+
 /// The service's answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reply")]
@@ -119,7 +174,21 @@ pub enum Response {
     Snapshots {
         snapshots: Vec<SnapshotInfo>,
     },
-    Restored,
+    /// Restore or vault extract finished; `folder` is where the files are now.
+    Restored {
+        folder: String,
+    },
+    Files {
+        entries: Vec<FileEntry>,
+    },
+    /// Vault add finished: `moved` items are now only in the vault.
+    VaultAdded {
+        snapshot: String,
+        moved: u32,
+    },
+    Vault {
+        items: Vec<VaultItem>,
+    },
     Disks {
         disks: Vec<DiskInfo>,
     },
@@ -181,7 +250,7 @@ mod tests {
             password: "pw".into(),
             snapshot: "abc".into(),
             target: "D:/out".into(),
-            path: None,
+            paths: vec![],
         };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), r);

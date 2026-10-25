@@ -7,11 +7,11 @@ use crate::security::{
 use crate::store::{self, Store};
 use lifeboat_core::config::{Config, PendingDelete, DELETE_DELAY_SECS};
 use lifeboat_core::disk::PrepareMode;
-use lifeboat_core::ipc::{Request, Response, SnapshotInfo, PIPE_NAME};
+use lifeboat_core::ipc::{FileEntry, Request, Response, SnapshotInfo, VaultItem, PIPE_NAME};
 use lifeboat_detect::FreezeState;
-use lifeboat_engine::Engine;
+use lifeboat_engine::{Engine, Snapshot};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -353,8 +353,12 @@ fn set_folders(
     if removes {
         // Malware must not be able to silently stop backups: removing needs the password.
         let pw = password.unwrap_or_default();
-        if let Err(r) = password_gate(&cfg, limiter, &pw) {
-            return refused(r);
+        let checked = with_volume(st, &cfg, |c, _| match password_gate(c, limiter, &pw) {
+            Ok(()) => Response::Done,
+            Err(r) => refused(r),
+        });
+        if !matches!(checked, Response::Done) {
+            return checked;
         }
     }
     let added: Vec<PathBuf> = new
@@ -374,6 +378,369 @@ fn set_folders(
         }
     }
     Response::Done
+}
+
+/// Run `f` with the backup repository reachable. In production the partition is hidden at
+/// rest, so it is unhidden and mounted for the whole call (the `Located` guard re-hides it
+/// when `f` returns). A backup cycle never runs at the same time. `f` gets a config whose
+/// `repo` is the reachable path and, when a real volume is mounted, that volume's path.
+/// Without a `partition_guid` (test mode) the repo is a plain folder and nothing is mounted.
+fn with_volume(
+    st: &State,
+    cfg: &Config,
+    f: impl FnOnce(&Config, Option<&str>) -> Response,
+) -> Response {
+    if cfg.repo.as_os_str().is_empty() {
+        return err("backup repository is not configured");
+    }
+    let _one = st.cycle_lock.lock().unwrap_or_else(|e| e.into_inner());
+    if cfg.partition_guid.is_empty() {
+        return f(cfg, None);
+    }
+    let volume = match locate_volume(cfg) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let mut c = cfg.clone();
+    c.repo = PathBuf::from(&volume.path).join("repo");
+    f(&c, Some(&volume.path))
+}
+
+/// A freeze state that cannot be read counts as frozen.
+fn is_frozen(st: &State) -> bool {
+    FreezeState::load(&st.paths.freeze)
+        .map(|f| f.frozen)
+        .unwrap_or(true)
+}
+
+fn is_vault(s: &Snapshot) -> bool {
+    s.tags.iter().any(|t| t == lifeboat_engine::VAULT_TAG)
+}
+
+/// Vault snapshots, newest first.
+fn vault_snapshots(e: &Engine) -> Result<Vec<Snapshot>, String> {
+    let mut v: Vec<Snapshot> = e
+        .snapshots()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(is_vault)
+        .collect();
+    v.sort_by(|a, b| b.time.cmp(&a.time));
+    Ok(v)
+}
+
+/// `latest` (the newest normal backup) or an id / unique id prefix.
+fn resolve_snapshot(e: &Engine, id: &str) -> Result<Snapshot, String> {
+    if !lifeboat_engine::valid_snapshot_id(id) {
+        return Err("bad snapshot id".into());
+    }
+    let mut all = e.snapshots().map_err(|e| e.to_string())?;
+    if id == "latest" {
+        all.retain(|s| !is_vault(s));
+        all.sort_by(|a, b| a.time.cmp(&b.time));
+        return all.pop().ok_or_else(|| "there are no backups yet".into());
+    }
+    if let Some(i) = all.iter().position(|s| s.id == id) {
+        return Ok(all.swap_remove(i));
+    }
+    let mut m: Vec<Snapshot> = all.into_iter().filter(|s| s.id.starts_with(id)).collect();
+    match m.len() {
+        1 => Ok(m.remove(0)),
+        0 => Err("backup not found".into()),
+        _ => Err("backup id is not unique".into()),
+    }
+}
+
+/// A snapshot-internal path from the UI: absolute, restic style, no `..`.
+fn check_restic_path(p: &str) -> Result<(), String> {
+    if !p.starts_with('/') || p.contains('\\') || p.split('/').any(|c| c == "..") {
+        return Err(format!("bad path {p:?}"));
+    }
+    Ok(())
+}
+
+/// The snapshot's backed-up top folders as restic paths (each once).
+fn top_paths(s: &Snapshot) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    s.paths
+        .iter()
+        .map(|p| lifeboat_engine::to_restic_path(p))
+        .filter(|p| seen.insert(p.to_lowercase()))
+        .collect()
+}
+
+fn list_snapshots(c: &Config) -> Result<Response, String> {
+    let e = engine(c)?;
+    let v = e.snapshots().map_err(|e| e.to_string())?;
+    Ok(Response::Snapshots {
+        snapshots: v
+            .into_iter()
+            .filter(|s| !is_vault(s))
+            .map(|s| SnapshotInfo {
+                id: s.id,
+                short_id: s.short_id,
+                time: s.time,
+                paths: s.paths,
+            })
+            .collect(),
+    })
+}
+
+fn list_files(c: &Config, snapshot: &str, path: Option<&str>) -> Result<Response, String> {
+    let e = engine(c)?;
+    let snap = resolve_snapshot(&e, snapshot)?;
+    let entries = match path {
+        None => {
+            let mut v: Vec<FileEntry> = snap
+                .paths
+                .iter()
+                .map(|p| FileEntry {
+                    path: lifeboat_engine::to_restic_path(p),
+                    name: p.clone(),
+                    dir: true,
+                    size: 0,
+                    mtime: snap.time.clone(),
+                })
+                .collect();
+            v.sort_by_key(|f| f.name.to_lowercase());
+            v.dedup_by_key(|f| f.path.to_lowercase());
+            v
+        }
+        Some(p) => {
+            check_restic_path(p)?;
+            e.list_dir(&snap.id, p)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|n| FileEntry {
+                    path: n.path,
+                    name: n.name,
+                    dir: n.dir,
+                    size: n.size,
+                    mtime: n.mtime,
+                })
+                .collect()
+        }
+    };
+    Ok(Response::Files { entries })
+}
+
+fn restore(c: &Config, snapshot: &str, target: &str, paths: &[String]) -> Result<Response, String> {
+    if target.trim().is_empty() {
+        return Err("no folder to restore into".into());
+    }
+    let e = engine(c)?;
+    let snap = resolve_snapshot(&e, snapshot)?;
+    let items = if paths.is_empty() {
+        top_paths(&snap)
+    } else {
+        for p in paths {
+            check_restic_path(p)?;
+        }
+        paths.to_vec()
+    };
+    if items.is_empty() {
+        return Err("this backup holds no folders".into());
+    }
+    e.restore_groups(&[(snap.id, items)], Path::new(target))
+        .map_err(|e| e.to_string())?;
+    Ok(Response::Restored {
+        folder: target.to_string(),
+    })
+}
+
+/// Folders the vault never takes: the system, program files, the Lifeboat volume and repo.
+fn protected_dirs(c: &Config, volume: Option<&str>) -> Vec<String> {
+    let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+    let mut v = vec![
+        env("WINDIR", r"C:\Windows"),
+        env("ProgramFiles", r"C:\Program Files"),
+        env("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        env("ProgramData", r"C:\ProgramData"),
+        c.repo.to_string_lossy().into_owned(),
+    ];
+    v.extend(volume.map(str::to_string));
+    v
+}
+
+/// Refuse a path the vault must never take (and so never delete): not an absolute drive-letter
+/// path, a drive root, or inside / equal to one of `protected`.
+pub fn refuse_vault_path(path: &str, protected: &[String]) -> Result<(), String> {
+    let b = path.as_bytes();
+    let drive = b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/');
+    if !drive {
+        return Err(format!("{path} is not a full path with a drive letter"));
+    }
+    if path.split(['\\', '/']).any(|c| c == "..") {
+        return Err(format!("{path} contains \"..\""));
+    }
+    let n = lifeboat_engine::to_restic_path(path).to_lowercase();
+    if n.matches('/').count() <= 1 {
+        return Err(format!("{path} is a whole drive; choose folders inside it"));
+    }
+    for p in protected.iter().filter(|p| !p.is_empty()) {
+        let q = lifeboat_engine::to_restic_path(p).to_lowercase();
+        if n == q || n.starts_with(&format!("{q}/")) {
+            return Err(format!("{path} is a protected system or Lifeboat folder"));
+        }
+    }
+    Ok(())
+}
+
+fn remove_file_force(p: &Path) -> io::Result<()> {
+    match std::fs::remove_file(p) {
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            let mut perm = std::fs::metadata(p)?.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            std::fs::set_permissions(p, perm)?;
+            std::fs::remove_file(p)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+/// Delete a folder: the files of each level first, then the subfolders, then the folder.
+fn delete_tree(p: &Path) -> io::Result<()> {
+    let mut dirs = Vec::new();
+    let rd = match std::fs::read_dir(p) {
+        Ok(r) => r,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in rd {
+        let path = entry?.path();
+        if std::fs::symlink_metadata(&path)?.is_dir() {
+            dirs.push(path);
+        } else {
+            remove_file_force(&path)?;
+        }
+    }
+    for d in dirs {
+        delete_tree(&d)?;
+    }
+    match std::fs::remove_dir(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+fn delete_original(p: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => delete_tree(p),
+        Ok(_) => remove_file_force(p),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Move `paths` into the vault: back up, verify every file by name and size, only then delete.
+fn vault_add(c: &Config, volume: Option<&str>, paths: &[String]) -> Result<Response, String> {
+    if paths.is_empty() {
+        return Err("nothing chosen to move into the vault".into());
+    }
+    let protected = protected_dirs(c, volume);
+    for p in paths {
+        refuse_vault_path(p, &protected)?;
+        if std::fs::symlink_metadata(p).is_err() {
+            return Err(format!("{p} does not exist"));
+        }
+    }
+    let e = engine(c)?;
+    let locals: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let snapshot = e
+        .backup_paths(&locals, lifeboat_engine::VAULT_TAG)
+        .map_err(|e| format!("could not copy into the vault; nothing was deleted: {e}"))?;
+    // Compare what is on disk now with what the snapshot holds.
+    let mut bad = Vec::new();
+    for (p, local) in paths.iter().zip(&locals) {
+        let expected = lifeboat_engine::local_files(local)
+            .map_err(|e| format!("cannot read {p}; nothing was deleted: {e}"))?;
+        let listed = e
+            .ls(&snapshot, &lifeboat_engine::to_restic_path(p), true)
+            .map_err(|e| format!("cannot check the vault copy; nothing was deleted: {e}"))?;
+        bad.extend(lifeboat_engine::vault_mismatches(&expected, &listed));
+    }
+    if !bad.is_empty() {
+        let shown: Vec<&str> = bad.iter().take(5).map(String::as_str).collect();
+        return Err(format!(
+            "the vault copy does not match ({} file(s), e.g. {}); nothing was deleted",
+            bad.len(),
+            shown.join(", ")
+        ));
+    }
+    for (p, local) in paths.iter().zip(&locals) {
+        delete_original(local).map_err(|e| {
+            format!("the vault copy is safe but {p} could not be fully deleted: {e}")
+        })?;
+    }
+    Ok(Response::VaultAdded {
+        snapshot,
+        moved: locals.len() as u32,
+    })
+}
+
+fn vault_list(c: &Config) -> Result<Response, String> {
+    let e = engine(c)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    for s in vault_snapshots(&e)? {
+        for p in &s.paths {
+            let rp = lifeboat_engine::to_restic_path(p);
+            if !seen.insert(rp.to_lowercase()) {
+                continue; // an older copy of a path added again
+            }
+            let nodes = e.ls(&s.id, &rp, true).map_err(|e| e.to_string())?;
+            let dir = nodes
+                .iter()
+                .any(|n| n.dir && n.path.eq_ignore_ascii_case(&rp));
+            items.push(VaultItem {
+                path: p.clone(),
+                dir,
+                size: nodes.iter().filter(|n| !n.dir).map(|n| n.size).sum(),
+                added: s.time.clone(),
+                snapshot: s.id.clone(),
+            });
+        }
+    }
+    Ok(Response::Vault { items })
+}
+
+fn vault_extract(c: &Config, paths: &[String], target: &str) -> Result<Response, String> {
+    if paths.is_empty() {
+        return Err("nothing chosen to take out of the vault".into());
+    }
+    if target.trim().is_empty() {
+        return Err("no folder to copy into".into());
+    }
+    let e = engine(c)?;
+    let snaps = vault_snapshots(&e)?;
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for p in paths {
+        let key = lifeboat_engine::to_restic_path(p).to_lowercase();
+        let (snap, item) = snaps
+            .iter()
+            .find_map(|s| {
+                s.paths
+                    .iter()
+                    .map(|sp| lifeboat_engine::to_restic_path(sp))
+                    .find(|sp| sp.to_lowercase() == key)
+                    .map(|sp| (s, sp))
+            })
+            .ok_or_else(|| format!("{p} is not in the vault"))?;
+        match groups.iter_mut().find(|g| g.0 == snap.id) {
+            Some(g) => g.1.push(item),
+            None => groups.push((snap.id.clone(), vec![item])),
+        }
+    }
+    e.restore_groups(&groups, Path::new(target))
+        .map_err(|e| e.to_string())?;
+    Ok(Response::Restored {
+        folder: target.to_string(),
+    })
 }
 
 /// Compute the reply for one request line. `limiter` counts wrong passwords; `is_admin` tells
@@ -405,40 +772,45 @@ pub fn handle_line(
             )),
             Outcome::Error(e) => err(e),
         },
-        Request::ListSnapshots => match engine(&cfg) {
-            Ok(e) => e
-                .snapshots()
-                .map(|v| Response::Snapshots {
-                    snapshots: v
-                        .into_iter()
-                        .map(|s| SnapshotInfo {
-                            id: s.id,
-                            short_id: s.short_id,
-                            time: s.time,
-                            paths: s.paths,
-                        })
-                        .collect(),
-                })
-                .unwrap_or_else(err),
-            Err(m) => err(m),
-        },
+        Request::ListSnapshots => {
+            with_volume(st, &cfg, |c, _| list_snapshots(c).unwrap_or_else(err))
+        }
+        Request::ListFiles { snapshot, path } => with_volume(st, &cfg, |c, _| {
+            list_files(c, &snapshot, path.as_deref()).unwrap_or_else(err)
+        }),
         Request::Restore {
             snapshot,
             target,
-            path,
+            paths,
             password,
-        } => {
-            if let Err(r) = password_gate(&cfg, limiter, &password) {
+        } => with_volume(st, &cfg, |c, _| {
+            if let Err(r) = password_gate(c, limiter, &password) {
                 return refused(r);
             }
-            match engine(&cfg) {
-                Ok(e) => e
-                    .restore(&snapshot, std::path::Path::new(&target), path.as_deref())
-                    .map(|_| Response::Restored)
-                    .unwrap_or_else(err),
-                Err(m) => err(m),
+            restore(c, &snapshot, &target, &paths).unwrap_or_else(err)
+        }),
+        Request::VaultAdd { password, paths } => {
+            if is_frozen(st) {
+                return err("backups are frozen; unfreeze first");
             }
+            with_volume(st, &cfg, |c, volume| {
+                if let Err(r) = password_gate(c, limiter, &password) {
+                    return refused(r);
+                }
+                vault_add(c, volume, &paths).unwrap_or_else(err)
+            })
         }
+        Request::VaultList => with_volume(st, &cfg, |c, _| vault_list(c).unwrap_or_else(err)),
+        Request::VaultExtract {
+            password,
+            paths,
+            target,
+        } => with_volume(st, &cfg, |c, _| {
+            if let Err(r) = password_gate(c, limiter, &password) {
+                return refused(r);
+            }
+            vault_extract(c, &paths, &target).unwrap_or_else(err)
+        }),
         Request::ListDisks => match lifeboat_disk::list_disks() {
             Ok(disks) => Response::Disks { disks },
             Err(e) => err(e),
@@ -479,8 +851,14 @@ pub fn handle_line(
             init_repo(st, password, folders)
         }
         Request::DeleteSnapshots { password, ids } => {
-            if let Err(r) = password_gate(&cfg, limiter, &password) {
-                return refused(r);
+            let checked = with_volume(st, &cfg, |c, _| {
+                match password_gate(c, limiter, &password) {
+                    Ok(()) => Response::Done,
+                    Err(r) => refused(r),
+                }
+            });
+            if !matches!(checked, Response::Done) {
+                return checked;
             }
             let due = now_unix() + DELETE_DELAY_SECS;
             let r = st.update(|c| {
@@ -493,16 +871,28 @@ pub fn handle_line(
             r.map(|_| Response::Done).unwrap_or_else(err)
         }
         Request::CancelDelete { password } => {
-            if let Err(r) = password_gate(&cfg, limiter, &password) {
-                return refused(r);
+            let checked = with_volume(st, &cfg, |c, _| {
+                match password_gate(c, limiter, &password) {
+                    Ok(()) => Response::Done,
+                    Err(r) => refused(r),
+                }
+            });
+            if !matches!(checked, Response::Done) {
+                return checked;
             }
             st.update(|c| c.pending_deletes.clear())
                 .map(|_| Response::Done)
                 .unwrap_or_else(err)
         }
         Request::Unfreeze { password } => {
-            if let Err(r) = password_gate(&cfg, limiter, &password) {
-                return refused(r);
+            let checked = with_volume(st, &cfg, |c, _| {
+                match password_gate(c, limiter, &password) {
+                    Ok(()) => Response::Done,
+                    Err(r) => refused(r),
+                }
+            });
+            if !matches!(checked, Response::Done) {
+                return checked;
             }
             let mut f = FreezeState::load(&st.paths.freeze).unwrap_or_default();
             f.clear();
@@ -810,21 +1200,247 @@ mod tests {
     }
 
     #[test]
+    fn vault_and_browse_requests_validate() {
+        let d = tempfile::tempdir().unwrap();
+        let st = state_with(Config::default(), d.path());
+        for line in [
+            r#"{"cmd":"VaultAdd","paths":["C:/x"]}"#,
+            r#"{"cmd":"VaultExtract","paths":[],"target":"C:/x"}"#,
+            r#"{"cmd":"ListFiles"}"#,
+        ] {
+            assert!(
+                message(call(line, &st, true)).starts_with("bad request"),
+                "{line}"
+            );
+        }
+        for line in [
+            r#"{"cmd":"ListFiles","snapshot":"latest","path":null}"#,
+            r#"{"cmd":"VaultList"}"#,
+            r#"{"cmd":"VaultAdd","password":"pw","paths":["C:/x"]}"#,
+            r#"{"cmd":"VaultExtract","password":"pw","paths":["C:/x"],"target":"C:/y"}"#,
+        ] {
+            assert!(
+                message(call(line, &st, true)).contains("not configured"),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn vault_refuses_system_and_odd_paths() {
+        let prot = vec![r"C:\Windows".to_string(), r"C:\Program Files".to_string()];
+        for bad in [
+            r"C:\",
+            "D:/",
+            r"C:\Windows",
+            r"c:\windows\system32",
+            r"C:\Program Files\App",
+            r"relative\dir",
+            r"\\server\share\x",
+            r"C:\Users\..\Windows",
+        ] {
+            assert!(refuse_vault_path(bad, &prot).is_err(), "{bad}");
+        }
+        for good in [r"C:\Users\me\Docs", "D:/stuff/a.txt", r"C:\Windowsish"] {
+            assert!(refuse_vault_path(good, &prot).is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn delete_original_removes_files_and_trees() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("t");
+        std::fs::create_dir_all(t.join("a/b")).unwrap();
+        std::fs::write(t.join("a/b/x.txt"), b"1").unwrap();
+        std::fs::write(t.join("y.txt"), b"2").unwrap();
+        delete_original(&t).unwrap();
+        assert!(!t.exists());
+        let f = d.path().join("f.txt");
+        std::fs::write(&f, b"1").unwrap();
+        delete_original(&f).unwrap();
+        assert!(!f.exists());
+        delete_original(&f).unwrap();
+    }
+
+    /// Real restic through `handle_line`: list, partial restore into a new folder, vault
+    /// add / list / extract, and the password gates. Skipped when vendor/restic is missing.
+    #[test]
+    fn real_restic_browse_restore_and_vault_flows() {
+        let restic_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor/restic");
+        let restic = restic_dir.join("restic.exe");
+        if !restic.exists() {
+            eprintln!("SKIPPED: vendor/restic/restic.exe missing; run scripts/fetch-restic.ps1");
+            return;
+        }
+        // The service finds restic next to its exe or on PATH; tests use PATH.
+        let mut path = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs = vec![restic_dir.canonicalize().unwrap()];
+        dirs.extend(std::env::split_paths(&path));
+        path = std::env::join_paths(dirs).unwrap();
+        std::env::set_var("PATH", path);
+
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("docs");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src.join("a [1].txt"), b"bracket").unwrap();
+        std::fs::write(src.join("sub").join("b.txt"), b"beta").unwrap();
+        let repo = t.path().join("repo");
+        let e = Engine::new(restic, repo.clone(), "pw", vec![src.clone()]);
+        e.init().unwrap();
+        let snap_id = e.backup().unwrap();
+
+        let cfg = Config {
+            repo,
+            password: "pw".into(),
+            folders: vec![src.clone()],
+            ..Config::default()
+        };
+        let state_dir = t.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let st = state_with(cfg, &state_dir);
+        FreezeState::default().save(&st.paths.freeze).unwrap();
+        let send = |r: Request| {
+            let line = serde_json::to_string(&r).unwrap();
+            call(&line, &st, false)
+        };
+
+        // Top level: restic path, Windows display name.
+        let Response::Files { entries } = send(Request::ListFiles {
+            snapshot: snap_id.clone(),
+            path: None,
+        }) else {
+            panic!("expected files")
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].path.starts_with('/') && !entries[0].path.contains('\\'));
+        assert_eq!(
+            entries[0].name.to_lowercase(),
+            src.to_string_lossy().to_lowercase()
+        );
+        // One level down, using the path exactly as returned.
+        let Response::Files { entries: kids } = send(Request::ListFiles {
+            snapshot: snap_id.clone(),
+            path: Some(entries[0].path.clone()),
+        }) else {
+            panic!("expected files")
+        };
+        let mut names: Vec<_> = kids.iter().map(|k| k.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, ["a [1].txt", "a.txt", "sub"]);
+        let bracket = kids.iter().find(|k| k.name == "a [1].txt").unwrap();
+        let sub = kids.iter().find(|k| k.name == "sub").unwrap();
+        assert!(sub.dir && sub.path.ends_with("/sub"));
+
+        // Wrong password is refused and restores nothing.
+        let out = t.path().join("new folder").join("restored");
+        let r = send(Request::Restore {
+            password: "nope".into(),
+            snapshot: snap_id.clone(),
+            target: out.to_string_lossy().into(),
+            paths: vec![bracket.path.clone()],
+        });
+        assert!(matches!(r, Response::Error { .. }));
+        assert!(!out.exists());
+
+        // Partial restore into a target folder that does not exist yet.
+        let r = send(Request::Restore {
+            password: "pw".into(),
+            snapshot: snap_id.clone(),
+            target: out.to_string_lossy().into(),
+            paths: vec![bracket.path.clone(), sub.path.clone()],
+        });
+        assert!(matches!(r, Response::Restored { .. }), "{r:?}");
+        assert_eq!(std::fs::read(out.join("a [1].txt")).unwrap(), b"bracket");
+        assert_eq!(
+            std::fs::read(out.join("sub").join("b.txt")).unwrap(),
+            b"beta"
+        );
+        assert!(!out.join("a.txt").exists());
+        // A second restore into the now non-empty folder is refused.
+        let r = send(Request::Restore {
+            password: "pw".into(),
+            snapshot: snap_id.clone(),
+            target: out.to_string_lossy().into(),
+            paths: vec![],
+        });
+        assert!(matches!(r, Response::Error { .. }));
+
+        // Vault: move a folder in, see it listed, take it out again.
+        let vault_dir = t.path().join("secret");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        std::fs::write(vault_dir.join("s.txt"), b"shh").unwrap();
+        let vp = vault_dir.to_string_lossy().to_string();
+        let r = send(Request::VaultAdd {
+            password: "pw".into(),
+            paths: vec![vp.clone()],
+        });
+        assert!(matches!(r, Response::VaultAdded { moved: 1, .. }), "{r:?}");
+        assert!(
+            !vault_dir.exists(),
+            "original must be deleted after the check"
+        );
+        let Response::Vault { items } = send(Request::VaultList) else {
+            panic!("expected vault")
+        };
+        assert_eq!(items.len(), 1);
+        assert!(items[0].dir && items[0].path.eq_ignore_ascii_case(&vp));
+        let back = t.path().join("vault out");
+        let r = send(Request::VaultExtract {
+            password: "pw".into(),
+            paths: vec![items[0].path.clone()],
+            target: back.to_string_lossy().into(),
+        });
+        assert!(matches!(r, Response::Restored { .. }), "{r:?}");
+        assert_eq!(
+            std::fs::read(back.join("secret").join("s.txt")).unwrap(),
+            b"shh"
+        );
+        // Vault snapshots stay out of the normal list.
+        let Response::Snapshots { snapshots } = send(Request::ListSnapshots) else {
+            panic!("expected snapshots")
+        };
+        assert_eq!(snapshots.len(), 1);
+
+        // The password gates open the real repo: right password passes, wrong one fails.
+        assert!(matches!(
+            send(Request::CancelDelete {
+                password: "pw".into()
+            }),
+            Response::Done
+        ));
+        assert!(matches!(
+            send(Request::CancelDelete {
+                password: "bad".into()
+            }),
+            Response::Error { .. }
+        ));
+    }
+
+    #[test]
+    fn restic_paths_from_ui_are_checked() {
+        assert!(check_restic_path("/C/Users/x").is_ok());
+        for bad in ["C/x", "/C/../x", r"/C\x"] {
+            assert!(check_restic_path(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn restore_needs_password_field() {
         let d = tempfile::tempdir().unwrap();
         let st = state_with(Config::default(), d.path());
         let r = call(
-            r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","path":null}"#,
+            r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","paths":[]}"#,
             &st,
             true,
         );
         assert!(message(r).starts_with("bad request"));
         let m = message(call(
-            r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","path":null,"password":""}"#,
+            r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","paths":[],"password":""}"#,
             &st,
             true,
         ));
-        assert!(m.starts_with("cannot check password"), "{m}");
+        assert!(m.contains("not configured"), "{m}");
     }
 
     #[test]
@@ -832,7 +1448,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let st = state_with(with_repo(), d.path());
         let l = RateLimiter::default();
-        let line = r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","path":null,"password":""}"#;
+        let line = r#"{"cmd":"Restore","snapshot":"s","target":"C:/x","paths":[],"password":""}"#;
         for _ in 0..5 {
             assert_eq!(
                 message(handle_line(line, &st, &l, &|| true)),

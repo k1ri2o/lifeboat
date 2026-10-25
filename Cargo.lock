@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-app"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "lifeboat-core",
  "serde",
@@ -2008,12 +2008,14 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-notification",
+ "tauri-plugin-single-instance",
  "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "lifeboat-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -2021,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-detect"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -2030,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-disk"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "lifeboat-core",
  "serde",
@@ -2039,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-engine"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -2048,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "lifeboat-svc"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "getrandom 0.2.17",
  "lifeboat-core",
@@ -3774,6 +3776,22 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "url",
+ "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-single-instance"
+version = "2.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "561cd99484561bc39c954768e7b41a66cebbe1ac3d9d081c34361f740c489e2c"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
  "zbus",
 ]
 

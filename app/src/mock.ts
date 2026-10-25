@@ -22,6 +22,9 @@ export async function installMock(mode: string): Promise<void> {
     { number: 2, model: "SanDisk Ultra USB", size: 500_000_000_000, bus_type: "USB", is_boot: false, is_system: false, partitions: [] },
     { number: 1, model: "Samsung SSD 870", size: 1_000_000_000_000, bus_type: "SATA", is_boot: false, is_system: false, partitions: [] },
   ];
+  let vault: { path: string; dir: boolean; size: number; added: string; snapshot: string }[] = [
+    { path: "C:\Users\Dad\Documents\Will.pdf", dir: false, size: 210 * 1024, added: iso(2000), snapshot: "v3" },
+  ];
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   mockIPC(async (cmd, args) => {
@@ -55,7 +58,39 @@ export async function installMock(mode: string): Promise<void> {
         folders = folders.filter((f) => f !== a.folder);
         return folders;
       case "restore":
+        if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
         await wait(800);
+        return String(a.target);
+      case "list_files": {
+        await wait(400);
+        const base = a.path ? String(a.path).replace(/[\/]+$/, "") : "";
+        // Same shape as the service: restic paths (/C/Users/Dad/Documents), display name in Windows form for top folders.
+        const e = (name: string, dir: boolean, size: number) => ({
+          path: `${base}/${name}`,
+          name,
+          dir,
+          size,
+          mtime: iso(300),
+        });
+        if (!base) return folders.map((f) => ({ path: "/" + f.replace(":", "").split("\\").join("/"), name: f, dir: true, size: 0, mtime: iso(300) }));
+        return [e("Holidays", true, 0), e("Letter to bank.docx", false, 48 * 1024), e("Photo 001.jpg", false, 3.2 * 1024 * 1024)];
+      }
+      case "vault_add":
+        if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
+        await wait(800);
+        vault = [...vault, ...(a.paths as string[]).map((p) => ({ path: p, dir: false, size: 120 * 1024, added: iso(1), snapshot: "v0" }))];
+        return (a.paths as string[]).length;
+      case "vault_list":
+        return vault;
+      case "vault_extract":
+        if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
+        await wait(800);
+        return String(a.target);
+      case "open_folder":
+        return null;
+      case "is_admin":
+        return mode !== "firstrun";
+      case "relaunch_as_admin":
         return null;
       default:
         return null;

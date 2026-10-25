@@ -3,7 +3,7 @@
 //! Every function takes the pipe name so tests can talk to a fake server.
 
 use lifeboat_core::disk::{DiskInfo, PrepareMode};
-use lifeboat_core::ipc::{client, Request, Response, SnapshotInfo};
+use lifeboat_core::ipc::{client, FileEntry, Request, Response, SnapshotInfo, VaultItem};
 use serde::Serialize;
 use std::io;
 
@@ -73,7 +73,7 @@ pub fn friendly(message: &str) -> String {
     if message == "password wrong" {
         "That password is not right. Please try again.".into()
     } else if message == "needs administrator" {
-        "This step needs administrator permission. Close Lifeboat, then open it again with \"Run as administrator\" and repeat the setup.".into()
+        "This step needs administrator permission. Press \"Restart as administrator\" and try again.".into()
     } else if let Some(m) = message
         .strip_prefix("locked for ")
         .and_then(|r| r.strip_suffix(" minutes"))
@@ -123,15 +123,75 @@ pub fn snapshots(pipe: &str) -> Result<Vec<SnapshotInfo>, ApiError> {
     }
 }
 
-pub fn restore(pipe: &str, snapshot: &str, target: &str, password: &str) -> Result<(), ApiError> {
+/// Restore `paths` (empty = the whole version) into `target`. Returns the folder the files landed in.
+pub fn restore(
+    pipe: &str,
+    snapshot: &str,
+    target: &str,
+    password: &str,
+    paths: Vec<String>,
+) -> Result<String, ApiError> {
     let req = Request::Restore {
         password: password.to_string(),
         snapshot: snapshot.to_string(),
         target: target.to_string(),
-        path: None,
+        paths,
     };
     match call(pipe, &req)? {
-        Response::Restored => Ok(()),
+        Response::Restored { folder } => Ok(folder),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// List one folder inside a version (`path` None = the top).
+pub fn list_files(
+    pipe: &str,
+    snapshot: &str,
+    path: Option<String>,
+) -> Result<Vec<FileEntry>, ApiError> {
+    let req = Request::ListFiles {
+        snapshot: snapshot.to_string(),
+        path,
+    };
+    match call(pipe, &req)? {
+        Response::Files { entries } => Ok(entries),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Move files into the vault. Returns how many items were moved.
+pub fn vault_add(pipe: &str, password: &str, paths: Vec<String>) -> Result<u32, ApiError> {
+    let req = Request::VaultAdd {
+        password: password.to_string(),
+        paths,
+    };
+    match call(pipe, &req)? {
+        Response::VaultAdded { moved, .. } => Ok(moved),
+        r => Err(unexpected(r)),
+    }
+}
+
+pub fn vault_list(pipe: &str) -> Result<Vec<VaultItem>, ApiError> {
+    match call(pipe, &Request::VaultList)? {
+        Response::Vault { items } => Ok(items),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Take items out of the vault into `target`. Returns the folder they landed in.
+pub fn vault_extract(
+    pipe: &str,
+    password: &str,
+    paths: Vec<String>,
+    target: &str,
+) -> Result<String, ApiError> {
+    let req = Request::VaultExtract {
+        password: password.to_string(),
+        paths,
+        target: target.to_string(),
+    };
+    match call(pipe, &req)? {
+        Response::Restored { folder } => Ok(folder),
         r => Err(unexpected(r)),
     }
 }
@@ -288,18 +348,94 @@ mod tests {
                 snapshot,
                 target,
                 password,
-                ..
+                paths,
             } => {
                 assert_eq!(password, "pw");
                 assert_eq!(snapshot, "abc");
                 assert_eq!(target, r"D:\Back");
-                Response::Restored
+                assert_eq!(paths, vec!["/Docs".to_string()]);
+                Response::Restored {
+                    folder: r"D:\Back".into(),
+                }
             }
             other => panic!("unexpected {other:?}"),
         });
-        on_thread(move || restore(&pipe, "abc", r"D:\Back", "pw"))
+        let folder =
+            on_thread(move || restore(&pipe, "abc", r"D:\Back", "pw", vec!["/Docs".into()]))
+                .await
+                .unwrap();
+        assert_eq!(folder, r"D:\Back");
+        h.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_files_maps_entries() {
+        let (pipe, h) = fake_server("files", 1, |req| match req {
+            Request::ListFiles { snapshot, path } => {
+                assert_eq!(snapshot, "abc");
+                assert_eq!(path.as_deref(), Some("/Docs"));
+                Response::Files {
+                    entries: vec![FileEntry {
+                        path: "/Docs/a.txt".into(),
+                        name: "a.txt".into(),
+                        dir: false,
+                        size: 12,
+                        mtime: "2026-10-24T09:00:00Z".into(),
+                    }],
+                }
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+        let list = on_thread(move || list_files(&pipe, "abc", Some("/Docs".into())))
             .await
             .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "a.txt");
+        h.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vault_calls_map_requests() {
+        let (pipe, h) = fake_server("vault", 3, |req| match req {
+            Request::VaultAdd { password, paths } => {
+                assert_eq!(password, "pw");
+                assert_eq!(paths, vec![r"C:\Secret".to_string()]);
+                Response::VaultAdded {
+                    snapshot: "s1".into(),
+                    moved: 4,
+                }
+            }
+            Request::VaultList => Response::Vault {
+                items: vec![VaultItem {
+                    path: "Secret".into(),
+                    dir: true,
+                    size: 99,
+                    added: "2026-10-24T09:00:00Z".into(),
+                    snapshot: "s1".into(),
+                }],
+            },
+            Request::VaultExtract {
+                password,
+                paths,
+                target,
+            } => {
+                assert_eq!(password, "pw");
+                assert_eq!(paths, vec!["Secret".to_string()]);
+                Response::Restored { folder: target }
+            }
+            other => panic!("unexpected {other:?}"),
+        });
+        let (p2, p3) = (pipe.clone(), pipe.clone());
+        let moved = on_thread(move || vault_add(&pipe, "pw", vec![r"C:\Secret".into()]))
+            .await
+            .unwrap();
+        assert_eq!(moved, 4);
+        let items = on_thread(move || vault_list(&p2)).await.unwrap();
+        assert_eq!(items[0].size, 99);
+        let folder = on_thread(move || vault_extract(&p3, "pw", vec!["Secret".into()], r"D:\Out"))
+            .await
+            .unwrap();
+        assert_eq!(folder, r"D:\Out");
         h.await.unwrap();
     }
 
@@ -367,7 +503,7 @@ mod tests {
     fn refusals_become_plain_words() {
         assert!(friendly("password wrong").contains("not right"));
         assert!(friendly("locked for 15 minutes").contains("15 minutes"));
-        assert!(friendly("needs administrator").contains("Run as administrator"));
+        assert!(friendly("needs administrator").contains("Restart as administrator"));
         assert!(friendly("cannot check password: x").starts_with("Lifeboat could not check"));
         assert_eq!(friendly("other"), "other");
     }

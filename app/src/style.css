@@ -166,3 +166,26 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; font: 13px
   .key-card { border: 2px solid #000; }
   .key { color: #000; }
 }
+
+/* v0.1.8: loading, admin button, file browser, vault */
+.loading { display: flex; align-items: center; gap: var(--s1); color: var(--muted); padding: var(--s1) 0; }
+.spinner { width: 18px; height: 18px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin 1s linear infinite; flex: none; }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+.admin-restart { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); margin-top: var(--s1); }
+.link { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-align: left; text-decoration: underline; }
+.link:hover { color: var(--accent-hover); }
+.link:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.big { font-size: 18px; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: var(--s1); }
+.crumb { background: none; border: 0; font: inherit; padding: 4px 8px; border-radius: 8px; color: var(--fg); }
+.crumb.link { color: var(--accent); cursor: pointer; text-decoration: underline; }
+.crumb.current { font-weight: 600; }
+.browser { display: flex; flex-direction: column; gap: var(--s2); }
+.file-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); max-height: 420px; overflow: auto; }
+.file-row { display: flex; align-items: center; gap: var(--s2); padding: 12px var(--s2); border-bottom: 1px solid var(--line); min-height: 52px; }
+.file-row:last-child { border-bottom: 0; }
+.file-row input[type="checkbox"] { width: 22px; height: 22px; flex: none; }
+.file-name { flex: 1; min-width: 0; word-break: break-word; }
+.file-meta { color: var(--muted); font-size: 14px; white-space: nowrap; }
+.file-row.covered { opacity: 0.7; }
+.plain-list { margin: var(--s1) 0 var(--s2); padding-left: var(--s3); max-height: 200px; overflow: auto; word-break: break-all; }
