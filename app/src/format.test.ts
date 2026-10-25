@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote, deleteDueDate, deleteConfirmText, pendingFor, deletesOnLine, longDate, removesOnLine, vaultRemoveConfirmText, waitingDeletesTitle } from "./format";
+import { folderParts, isStale, keyGroups, keyWithDashes, usagePercent, usageIsHigh, usageLine, busLabel, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote, deleteDueDate, deleteConfirmText, pendingFor, deletesOnLine, longDate, removesOnLine, vaultRemoveConfirmText, waitingDeletesTitle } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -73,6 +73,40 @@ describe("keyGroups", () => {
   it("copes with empty and very short keys", () => {
     expect(keyGroups("")).toEqual([]);
     expect(keyGroups("AB")).toEqual(["A", "B"]);
+  });
+});
+
+describe("keyWithDashes", () => {
+  it("joins 6 groups of 5 with dashes", () => {
+    expect(keyWithDashes("ABCDEFGHJKMNPQRSTVWXYZ0123456789".slice(0, 30))).toBe("ABCDE-FGHJK-MNPQR-STVWX-YZ012-34567");
+  });
+  it("accepts a key that already has spaces or dashes", () => {
+    expect(keyWithDashes("ABCDE FGHJK-MNPQR STVWX YZ012 34567")).toBe("ABCDE-FGHJK-MNPQR-STVWX-YZ012-34567");
+  });
+  it("is empty for an empty key", () => {
+    expect(keyWithDashes("")).toBe("");
+  });
+});
+
+describe("drive usage", () => {
+  it("computes a clamped whole percent", () => {
+    expect(usagePercent(25, 100)).toBe(25);
+    expect(usagePercent(150, 100)).toBe(100);
+    expect(usagePercent(null, 100)).toBe(0);
+    expect(usagePercent(10, 0)).toBe(0);
+  });
+  it("warns only above 85 percent", () => {
+    expect(usageIsHigh(85)).toBe(false);
+    expect(usageIsHigh(86)).toBe(true);
+  });
+  it("describes usage in plain words", () => {
+    expect(usageLine(null, null)).toContain("unlock");
+    expect(usageLine(30 * 1024 ** 3, 70 * 1024 ** 3)).toBe("30 GB used, 70 GB free");
+  });
+  it("names bus types plainly", () => {
+    expect(busLabel("USB")).toBe("USB drive");
+    expect(busLabel("NVMe")).toBe("Inside this computer");
+    expect(busLabel("Weird")).toBe("Drive");
   });
 });
 

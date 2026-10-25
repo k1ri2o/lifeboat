@@ -54,6 +54,38 @@ export interface Disk {
   partitions: Partition[];
 }
 
+export interface DriveDisk {
+  number: number;
+  model: string;
+  size: number;
+  bus_type: string;
+  is_system: boolean;
+  letters: string[];
+  holds_lifeboat: boolean;
+}
+export interface DriveCheck {
+  time: string;
+  ok: boolean;
+  detail: string;
+}
+/** The Lifeboat partition. Numbers are null when the drive is closed or offline. */
+export interface LifeboatDrive {
+  disk_number: number | null;
+  partition_size: number | null;
+  used_bytes: number | null;
+  free_bytes: number | null;
+  repo_bytes: number | null;
+  snapshot_count: number | null;
+  vault_count: number | null;
+  same_physical_disk: boolean;
+  last_check: DriveCheck | null;
+  open: boolean;
+}
+export interface DriveStats {
+  disks: DriveDisk[];
+  lifeboat: LifeboatDrive | null;
+}
+
 export interface FileEntry {
   path: string;
   name: string;
@@ -91,6 +123,8 @@ export const api = {
   homeState: () => call<HomeState>("home_state"),
   backupNow: () => call<void>("backup_now"),
   snapshots: () => call<Snapshot[]>("list_snapshots"),
+  /** Every disk plus the Lifeboat partition's usage. Read-only, needs no password. */
+  driveStats: () => call<DriveStats>("drive_stats"),
   /** Restore `paths` of a version (empty list = everything). Resolves to the folder used. */
   restore: (snapshot: string, target: string, password: string, paths: string[] = []) =>
     call<string>("restore", { snapshot, target, password, paths }),

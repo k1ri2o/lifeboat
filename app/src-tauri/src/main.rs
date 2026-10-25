@@ -80,6 +80,13 @@ async fn backup_now(app: AppHandle) -> Result<(), ApiError> {
     run_backup(app).await
 }
 
+// --- drive statistics (read-only) ---
+#[tauri::command]
+async fn drive_stats() -> Result<pipe::DriveStatsInfo, ApiError> {
+    blocking(|| pipe::drive_stats(PIPE_NAME)).await
+}
+// --- end drive statistics ---
+
 #[tauri::command]
 async fn list_snapshots() -> Result<Vec<SnapshotInfo>, ApiError> {
     blocking(|| pipe::snapshots(PIPE_NAME)).await
@@ -391,6 +398,7 @@ fn main() {
             home_state,
             backup_now,
             list_snapshots,
+            drive_stats,
             restore,
             delete_snapshots,
             cancel_delete,

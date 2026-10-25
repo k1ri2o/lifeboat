@@ -10,6 +10,7 @@ use crate::store::{self, Store};
 use lifeboat_core::config::{Config, PendingDelete, PendingVaultRemove, DELETE_DELAY_SECS};
 use lifeboat_core::disk::PrepareMode;
 use lifeboat_core::ipc::{FileEntry, Request, Response, SnapshotInfo, VaultItem, PIPE_NAME};
+use lifeboat_core::key::verify_forgiving;
 use lifeboat_detect::FreezeState;
 use lifeboat_engine::{Engine, Snapshot};
 use std::io;
@@ -141,22 +142,30 @@ fn engine(cfg: &Config) -> Result<Engine, String> {
     ))
 }
 
-/// Check `password` against the repository (`restic cat config`).
+/// Check `password` against the repository (`restic cat config`). A recovery key typed with
+/// spaces, lower case or look-alike letters is also tried in its exact form.
 fn verify_password(cfg: &Config, password: &str) -> Result<bool, String> {
+    Ok(accepted_password(cfg, password)?.is_some())
+}
+
+/// The string that opens the repository: `password` as typed, or its normalised recovery key.
+fn accepted_password(cfg: &Config, password: &str) -> Result<Option<String>, String> {
     if cfg.repo.as_os_str().is_empty() {
         return Err("backup repository is not configured".into());
     }
     if password.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
-    Engine::new(
-        Engine::default_restic(),
-        cfg.repo.clone(),
-        password.to_string(),
-        cfg.folders.clone(),
-    )
-    .verify_password(password)
-    .map_err(|e| e.to_string())
+    verify_forgiving(password, |p| {
+        Engine::new(
+            Engine::default_restic(),
+            cfg.repo.clone(),
+            p.to_string(),
+            cfg.folders.clone(),
+        )
+        .verify_password(p)
+        .map_err(|e| e.to_string())
+    })
 }
 
 /// Password gate for dangerous requests, using the repo from `cfg`.
@@ -267,6 +276,124 @@ fn status(st: &State) -> Response {
     }
 }
 
+// --- drive statistics (read-only) ---
+
+/// Repo size on disk, remembered for a few minutes: walking a big repo is slow.
+static REPO_SIZE: Mutex<Option<(Instant, u64)>> = Mutex::new(None);
+const REPO_SIZE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn dir_size(p: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    rd.flatten()
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => dir_size(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+fn repo_size_cached(repo: &Path) -> u64 {
+    let mut g = REPO_SIZE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((t, n)) = *g {
+        if t.elapsed() < REPO_SIZE_TTL {
+            return n;
+        }
+    }
+    let n = dir_size(repo);
+    *g = Some((Instant::now(), n));
+    n
+}
+
+/// Free bytes on the volume at `path`, or `None` when Windows refuses.
+fn free_bytes(path: &str) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut w: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().collect();
+    if !path.ends_with('\\') {
+        w.push(b'\\' as u16);
+    }
+    w.push(0);
+    let mut free = 0u64;
+    // SAFETY: `w` is NUL-terminated and outlives the call; `free` is a valid out pointer and
+    // the two optional out pointers may be null.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            w.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(free)
+}
+
+/// All disks plus what is known about the Lifeboat partition. Never opens the backup disk: the
+/// live numbers (free space, repo size, counts) are only read while it is already open.
+fn drive_stats(st: &State) -> Response {
+    let cfg = st.snapshot_cfg();
+    let disks = match lifeboat_disk::list_disks() {
+        Ok(d) => d,
+        Err(e) => return err(format!("cannot read the disks: {e}")),
+    };
+    drive_stats_from(st, &cfg, &disks, free_bytes)
+}
+
+fn drive_stats_from(
+    st: &State,
+    cfg: &Config,
+    disks: &[lifeboat_core::disk::DiskInfo],
+    free: impl Fn(&str) -> Option<u64>,
+) -> Response {
+    use lifeboat_core::drive::{drive_disks, lifeboat_disk, same_disk, LifeboatDrive};
+    let guid = cfg.partition_guid.as_str();
+    let home = lifeboat_disk(disks, guid);
+    let lifeboat = (!guid.is_empty()).then(|| {
+        let part = home.and_then(|d| {
+            d.partitions
+                .iter()
+                .find(|p| lifeboat_core::disk::same_guid(&p.guid, guid))
+        });
+        let mut l = LifeboatDrive {
+            disk_number: home.map(|d| d.number),
+            partition_size: part.map(|p| p.size),
+            same_physical_disk: same_disk(disks, guid, &cfg.folders),
+            last_check: cfg.last_check.clone(),
+            ..LifeboatDrive::default()
+        };
+        if let Some(vol) = st.ctx.lease.held_path() {
+            l.open = true;
+            l.free_bytes = free(&vol);
+            l.used_bytes = l
+                .partition_size
+                .zip(l.free_bytes)
+                .map(|(t, f)| t.saturating_sub(f));
+            let mut c = cfg.clone();
+            c.repo = PathBuf::from(&vol).join("repo");
+            l.repo_bytes = Some(repo_size_cached(&c.repo));
+            if !c.password.is_empty() {
+                if let Ok(e) = engine(&c) {
+                    if let Ok(all) = all_snapshots(&e, &c, &st.ctx.caches) {
+                        let vault = all.iter().filter(|s| is_vault(s)).count();
+                        l.vault_count = Some(vault as u32);
+                        l.snapshot_count = Some((all.len() - vault) as u32);
+                    }
+                }
+            }
+        } else if let Some((_, n)) = *REPO_SIZE.lock().unwrap_or_else(|e| e.into_inner()) {
+            l.repo_bytes = Some(n); // the last size seen
+        }
+        l
+    });
+    Response::DriveStats {
+        disks: drive_disks(disks, guid),
+        lifeboat,
+    }
+}
+
+// --- end drive statistics ---
+
 fn folder_strings(cfg: &Config) -> Vec<String> {
     cfg.folders
         .iter()
@@ -337,16 +464,34 @@ fn init_repo(
         Err(e) => return err(e),
     };
     let repo = PathBuf::from(&volume.path).join("repo");
+    // Wrong guesses count against the same lockout as every other password check.
+    // A recovery key typed loosely opens an existing repository too; the exact form is saved.
+    let mut password = password;
+    let check = gate(limiter, Instant::now(), || {
+        let ok = verify_forgiving(&password, |p| {
+            Engine::new(
+                Engine::default_restic(),
+                repo.clone(),
+                p.to_string(),
+                folders.clone(),
+            )
+            .verify_password(p)
+            .map_err(|e| e.to_string())
+        })?;
+        match ok {
+            Some(p) => {
+                password = p;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    });
     let eng = Engine::new(
         Engine::default_restic(),
         repo.clone(),
         password.clone(),
         folders.clone(),
     );
-    // Wrong guesses count against the same lockout as every other password check.
-    let check = gate(limiter, Instant::now(), || {
-        eng.verify_password(&password).map_err(|e| e.to_string())
-    });
     let existing = match existing_repo(check) {
         Ok(e) => e,
         Err(m) if fresh && m == OTHER_PASSWORD => {
@@ -927,6 +1072,7 @@ fn dispatch(
     match req {
         Request::Ping => Response::Pong,
         Request::Status => status(st),
+        Request::DriveStats => drive_stats(st),
         Request::Backup => match st.run_backup() {
             Outcome::Backed { snapshot, .. } => Response::BackupDone { snapshot },
             Outcome::SkippedFrozen => err("backups are frozen; unfreeze first"),
@@ -1295,6 +1441,67 @@ mod tests {
             }
         ));
         assert!(matches!(call("nope", &st, false), Response::Error { .. }));
+    }
+
+    #[test]
+    fn drive_stats_closed_disk_returns_what_is_known() {
+        use lifeboat_core::disk::{DiskInfo, PartitionInfo, BASIC_DATA_TYPE_GUID};
+        let d = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            partition_guid: "{guid-1}".into(),
+            folders: vec![PathBuf::from("C:/Users")],
+            ..Config::default()
+        };
+        let st = state_with(cfg.clone(), d.path());
+        let p = |letter, guid: &str| PartitionInfo {
+            number: 1,
+            offset: 0,
+            size: 100,
+            gpt_type: BASIC_DATA_TYPE_GUID.into(),
+            drive_letter: letter,
+            is_hidden: false,
+            no_default_letter: false,
+            guid: guid.into(),
+        };
+        let disk = |number, partitions| DiskInfo {
+            number,
+            model: "m".into(),
+            size: 1000,
+            bus_type: "USB".into(),
+            is_boot: false,
+            is_system: false,
+            partitions,
+        };
+        let disks = vec![
+            disk(0, vec![p(Some('C'), "{x}")]),
+            disk(2, vec![p(None, "{guid-1}")]),
+        ];
+        let Response::DriveStats {
+            disks: out,
+            lifeboat,
+        } = drive_stats_from(&st, &cfg, &disks, |_| panic!("must not read a closed disk"))
+        else {
+            panic!("wrong reply")
+        };
+        assert_eq!(out.len(), 2);
+        assert!(out[1].holds_lifeboat && !out[0].holds_lifeboat);
+        let l = lifeboat.unwrap();
+        assert_eq!(l.disk_number, Some(2));
+        assert_eq!(l.partition_size, Some(100));
+        assert!(!l.open && l.free_bytes.is_none() && l.snapshot_count.is_none());
+        assert!(!l.same_physical_disk);
+    }
+
+    #[test]
+    fn drive_stats_without_a_lifeboat_disk_has_no_lifeboat() {
+        let d = tempfile::tempdir().unwrap();
+        let st = state_with(Config::default(), d.path());
+        let Response::DriveStats { lifeboat, .. } =
+            drive_stats_from(&st, &Config::default(), &[], |_| None)
+        else {
+            panic!("wrong reply")
+        };
+        assert!(lifeboat.is_none());
     }
 
     #[test]

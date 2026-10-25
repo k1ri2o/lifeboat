@@ -125,6 +125,22 @@ pub fn backup(pipe: &str) -> Result<String, ApiError> {
     }
 }
 
+// --- drive statistics (read-only) ---
+/// What the Drives card shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DriveStatsInfo {
+    pub disks: Vec<lifeboat_core::drive::DriveDisk>,
+    pub lifeboat: Option<lifeboat_core::drive::LifeboatDrive>,
+}
+
+pub fn drive_stats(pipe: &str) -> Result<DriveStatsInfo, ApiError> {
+    match call(pipe, &Request::DriveStats)? {
+        Response::DriveStats { disks, lifeboat } => Ok(DriveStatsInfo { disks, lifeboat }),
+        r => Err(unexpected(r)),
+    }
+}
+// --- end drive statistics ---
+
 pub fn snapshots(pipe: &str) -> Result<Vec<SnapshotInfo>, ApiError> {
     match call(pipe, &Request::ListSnapshots)? {
         Response::Snapshots { snapshots } => Ok(snapshots),

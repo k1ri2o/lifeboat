@@ -93,6 +93,15 @@ impl Lease {
         drop(old);
     }
 
+    /// Path of the volume if the lease is held right now; never opens it and does not extend it.
+    pub fn held_path(&self) -> Option<String> {
+        self.slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|s| s.vol.path.clone())
+    }
+
     #[cfg(test)]
     pub fn is_held(&self) -> bool {
         self.slot
