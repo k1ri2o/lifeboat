@@ -2,4 +2,5 @@
 
 pub mod config;
 pub mod disk;
+pub mod drive;
 pub mod ipc;

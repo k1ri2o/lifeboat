@@ -225,3 +225,16 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; font: 13px
 @media (prefers-color-scheme: dark) { .status > .icon { background: rgba(255,255,255,.08); } }
 .btn { border-radius: 8px; }
 .btn:active:not(:disabled) { transform: translateY(1px); }
+
+/* Drives card (Settings) */
+.drives h2 { margin: 0 0 var(--s2); }
+.usage { margin-bottom: var(--s3); }
+.usage-title { font-weight: 600; margin: 0 0 6px; }
+.bar { height: 14px; border-radius: 999px; background: var(--ok-bg); overflow: hidden; margin-bottom: 6px; }
+.bar > span { display: block; height: 100%; background: var(--ok); }
+.bar.high { background: var(--warn-bg); }
+.bar.high > span { background: var(--warn); }
+.usage-warn { color: var(--warn); font-weight: 600; }
+.disk-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s2); }
+.disk-row { display: flex; align-items: center; gap: var(--s2); }
+.disk-row .grow { display: flex; flex-direction: column; }

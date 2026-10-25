@@ -2,11 +2,15 @@ import "./style.css";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { desktopDir, join } from "@tauri-apps/api/path";
-import { api, toApiError, type Disk, type FileEntry, type HomeState, type VaultItem, type Snapshot as Version } from "./api";
+import { api, toApiError, type DriveStats, type Disk, type FileEntry, type HomeState, type VaultItem, type Snapshot as Version } from "./api";
 import {
   folderParts,
   isStale,
   keyGroups,
+  usagePercent,
+  usageIsHigh,
+  usageLine,
+  busLabel,
   lastBackupStamp,
   versionCountLine,
   smallSize,
@@ -41,7 +45,14 @@ const app = document.getElementById("app")!;
 /** Latest-wins guard for whole screens: an answer for a screen the user already left is dropped. */
 const nav = guard();
 
+/** Where the setup wizard was opened from, so its Back button can return there. Null on first run. */
+let setupFrom: Screen | null = null;
+
 function go(s: Screen) {
+  if (s === "setup" && screen !== "setup") {
+    setupFrom = screen;
+    wiz.step = 1;
+  }
   screen = s;
   void render();
 }
@@ -93,6 +104,7 @@ async function render() {
     onData: (st, fromCache) => {
       if (screen === "home" && isFirstRun(st)) {
         screen = "setup";
+        setupFrom = null;
         return void render();
       }
       const page = h("div", { class: "page" });
@@ -883,9 +895,55 @@ async function renderVault(body: HTMLElement, alive: () => boolean = () => true)
 
 // ---------- Settings ----------
 
+/** Drives card: every disk, which one holds Lifeboat, and how full the Lifeboat space is. */
+function drivesCard(): HTMLElement {
+  const card = h("section", { class: "card drives" }, h("h2", {}, "Your drives"), spinner("Looking at your drives..."));
+  const draw = (ds: DriveStats) => {
+    const lb = ds.lifeboat;
+    const kids: Child[] = [h("h2", {}, "Your drives")];
+    if (lb) {
+      const pct = usagePercent(lb.used_bytes, lb.partition_size);
+      const high = usageIsHigh(pct);
+      kids.push(
+        h(
+          "div",
+          { class: "usage" },
+          h("p", { class: "usage-title" }, "Space for your backups"),
+          h("div", { class: `bar${high ? " high" : ""}`, role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct), "aria-label": "Backup space used" }, h("span", { style: `width:${pct}%` })),
+          h("p", {}, usageLine(lb.used_bytes, lb.free_bytes)),
+          high ? h("p", { class: "usage-warn" }, "Your backup space is almost full. Ask for help to make it bigger, or old backups may have to go.") : null,
+          h("p", { class: "muted small" }, [lb.snapshot_count != null ? versionCountLine(lb.snapshot_count) : "", lb.vault_count != null ? `${lb.vault_count} files in the vault` : ""].filter(Boolean).join(" - ")),
+          lb.same_physical_disk ? h("p", { class: "muted small" }, "Your files and your backups are on the same drive. If it fails, both are lost.") : null,
+          lb.last_check ? h("p", { class: "muted small" }, `Last health check: ${lb.last_check.ok ? "all good" : "a problem was found"}`) : null,
+          !lb.open ? h("p", { class: "muted small" }, "The backup space is closed right now, so some numbers are not shown.") : null,
+        ),
+      );
+    }
+    kids.push(
+      h(
+        "ul",
+        { class: "disk-list" },
+        ...ds.disks.map((d) =>
+          h(
+            "li",
+            { class: "disk-row" },
+            icon(/usb/i.test(d.bus_type) ? "usb" : "drive", 22),
+            h("div", { class: "grow" }, h("span", { class: "choice-title" }, d.model || "Drive"), h("span", { class: "muted small" }, `${sizeLabel(d.size)} - ${busLabel(d.bus_type)}${d.is_system ? " - Windows is on this drive" : ""}${d.letters.length ? ` (${d.letters.map((l) => l.replace(/:$/, "") + ":").join(", ")})` : ""}`)),
+            d.holds_lifeboat ? h("span", { class: "pill ok" }, "Lifeboat is here") : null,
+          ),
+        ),
+      ),
+    );
+    card.replaceChildren(...kids.filter((k): k is Node => !!k && typeof k !== "string"));
+  };
+  api.driveStats().then(draw, (e) => card.replaceChildren(h("h2", {}, "Your drives"), errorBox(toApiError(e), () => card.replaceWith(drivesCard()))));
+  return card;
+}
+
 function renderSettings(body: HTMLElement, st: HomeState) {
   body.append(
     pageTitle("Settings"),
+    drivesCard(),
     h(
       "section",
       { class: "card rows" },
@@ -1072,7 +1130,9 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
     h("p", { class: "hint" }, icon("info", 18), "Best: a USB drive that stays plugged in. Next best: a second drive in this computer. Avoid the drive Windows runs on: if it fails, the backups go with it."),
     list,
     detail,
-    h("div", { class: "actions" }, next),
+    setupFrom
+      ? h("div", { class: "actions split" }, button("Back", { onclick: () => go(setupFrom!) }), next)
+      : h("div", { class: "actions" }, next),
   );
   drawList();
   drawDetail();

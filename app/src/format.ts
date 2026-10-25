@@ -127,6 +127,32 @@ export function lastBackupLine(secs: number | null | undefined, now: Date = new 
   return `Last backup: ${relativeTime(new Date(secs * 1000).toISOString(), now)}`;
 }
 
+/** Whole percent (0-100) of a drive that is used; 0 when the numbers are missing. */
+export function usagePercent(used: number | null | undefined, total: number | null | undefined): number {
+  if (used == null || !total || total <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((used / total) * 100)));
+}
+
+/** The bar turns to a warning colour above this share of the space used. */
+export const USAGE_WARN_PERCENT = 85;
+
+export function usageIsHigh(percent: number): boolean {
+  return percent > USAGE_WARN_PERCENT;
+}
+
+/** "38 GB used, 64 GB free" in plain words. */
+export function usageLine(used: number | null | undefined, free: number | null | undefined): string {
+  if (used == null || free == null) return "Plug in and unlock the drive to see how much space is left.";
+  return `${sizeLabel(used)} used, ${sizeLabel(free)} free`;
+}
+
+/** A plain-English name for a drive's connection type. */
+export function busLabel(bus: string): string {
+  if (/usb/i.test(bus)) return "USB drive";
+  if (/nvme|sata|ata|raid|scsi|sas/i.test(bus)) return "Inside this computer";
+  return "Drive";
+}
+
 /**
  * Split a recovery key into 6 groups for easy copying by hand. Spaces and dashes in the key
  * are ignored. Groups are as even as possible, earlier groups longer.

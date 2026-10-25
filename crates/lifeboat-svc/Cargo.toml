@@ -16,7 +16,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 windows-service = "0.8"
 lifeboat-disk = { path = "../lifeboat-disk" }
 sha1 = "0.10"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = "3"

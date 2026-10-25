@@ -44,6 +44,29 @@ export async function installMock(mode: string): Promise<void> {
         return null;
       case "list_snapshots":
         return versions;
+      case "drive_stats":
+        await wait(300);
+        return {
+          disks: [
+            { number: 0, model: "Samsung SSD 980", size: 500_107_862_016, bus_type: "NVMe", is_system: true, letters: ["C"], holds_lifeboat: mode !== "firstrun" },
+            { number: 2, model: "SanDisk Ultra USB", size: 500_000_000_000, bus_type: "USB", is_system: false, letters: ["E"], holds_lifeboat: false },
+          ],
+          lifeboat:
+            mode === "firstrun"
+              ? null
+              : {
+                  disk_number: 0,
+                  partition_size: 107_374_182_400,
+                  used_bytes: mode === "attention" ? 94_489_280_512 : 38_654_705_664,
+                  free_bytes: mode === "attention" ? 12_884_901_888 : 68_719_476_736,
+                  repo_bytes: mode === "attention" ? 94_000_000_000 : 38_000_000_000,
+                  snapshot_count: versions.length,
+                  vault_count: 12,
+                  same_physical_disk: true,
+                  last_check: { time: iso(60 * 20), ok: true, detail: "no errors were found" },
+                  open: true,
+                },
+        };
       case "list_disks":
         return disks;
       case "prepare_disk":

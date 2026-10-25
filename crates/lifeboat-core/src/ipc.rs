@@ -3,6 +3,7 @@
 
 use crate::config::{CheckResult, PendingDelete, PendingVaultRemove};
 use crate::disk::{DiskInfo, PrepareMode};
+use crate::drive::{DriveDisk, LifeboatDrive};
 use serde::{Deserialize, Serialize};
 
 /// Name of the named pipe the service listens on.
@@ -14,6 +15,11 @@ pub const PIPE_NAME: &str = r"\\.\pipe\lifeboat";
 pub enum Request {
     Ping,
     Status,
+    // --- drive statistics (read-only) ---
+    /// Every disk, and what is known about the Lifeboat partition. No password: reveals nothing
+    /// secret.
+    DriveStats,
+    // --- end drive statistics ---
     /// Back up all configured folders now.
     Backup,
     /// Normal backup snapshots (vault snapshots are left out; see [`Request::VaultList`]).
@@ -177,6 +183,13 @@ pub enum Response {
         #[serde(default)]
         pending_vault_removes: Vec<PendingVaultRemove>,
     },
+    // --- drive statistics (read-only) ---
+    DriveStats {
+        disks: Vec<DriveDisk>,
+        /// `None` until a Lifeboat disk is prepared or when it is not found.
+        lifeboat: Option<LifeboatDrive>,
+    },
+    // --- end drive statistics ---
     /// A request without data finished.
     Done,
     /// The backed-up folders.
@@ -281,6 +294,20 @@ mod tests {
                 paths: vec![],
                 hostname: "OLD-PC".into(),
             }],
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
+    }
+
+    #[test]
+    fn drive_stats_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&Request::DriveStats).unwrap(),
+            r#"{"cmd":"DriveStats"}"#
+        );
+        let r = Response::DriveStats {
+            disks: vec![],
+            lifeboat: Some(LifeboatDrive::default()),
         };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
