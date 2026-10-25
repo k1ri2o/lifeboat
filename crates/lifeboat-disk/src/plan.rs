@@ -1,7 +1,7 @@
 //! Internal-disk setup: shrink a volume, then create the hidden partition in the freed space.
 
 use crate::guard::{check, Op};
-use crate::ops::{create_and_find, disk_by_number, PreparedVolume};
+use crate::ops::{create_and_find, disk_by_number, largest_free, PreparedVolume, SIZE_SLACK};
 use crate::ps::{self, quote};
 use crate::{Error, Result};
 use serde::Deserialize;
@@ -110,11 +110,14 @@ pub fn plan_shrink(drive_letter: char, lifeboat_size: u64) -> Result<ShrinkPlan>
 pub fn execute_shrink(plan: &ShrinkPlan) -> Result<PreparedVolume> {
     let disk = disk_by_number(plan.disk_number)?;
     check(&disk, Op::InternalShrink, false)?;
-    ps::run(&format!(
-        "Resize-Partition -DriveLetter {} -Size {}",
-        quote(&plan.drive_letter.to_string()),
-        plan.new_size
-    ))?;
+    // A setup that failed after the shrink left the freed space behind: use it, don't shrink again.
+    if largest_free(plan.disk_number)? + SIZE_SLACK < plan.lifeboat_size {
+        ps::run(&format!(
+            "Resize-Partition -DriveLetter {} -Size {}",
+            quote(&plan.drive_letter.to_string()),
+            plan.new_size
+        ))?;
+    }
     create_and_find(plan.disk_number, Some(plan.lifeboat_size))
 }
 

@@ -117,12 +117,20 @@ pub struct PreparedVolume {
 /// `-NoDefaultDriveLetter` set GPT attribute bits 62 and 63 (0xC000000000000000); the script
 /// checks they stuck. The last line it prints is the partition GUID. Pure text builder.
 pub fn create_partition_script(disk: u32, size: Option<u64>) -> String {
-    let extent = match size {
-        Some(s) => format!("-Size {s}"),
-        None => "-UseMaximumSize".to_string(),
+    // Windows starts a partition on a 1 MiB boundary, so when the free space does not start on
+    // one (a volume that ended off-boundary was shrunk) up to 1 MiB of it is lost. Take what is
+    // there, as long as it is no more than SIZE_SLACK short of the request.
+    let create = match size {
+        Some(s) => format!(
+            "$f = [uint64](Get-Disk -Number {disk}).LargestFreeExtent; $f = $f - ($f % 1MB); \
+             $sz = [Math]::Min([uint64]{s}, $f); \
+             if ($sz + {SIZE_SLACK} -lt [uint64]{s}) {{ throw \"only $f bytes free on disk {disk}, need {s}\" }}; \
+             $p = New-Partition -DiskNumber {disk} -Size $sz"
+        ),
+        None => format!("$p = New-Partition -DiskNumber {disk} -UseMaximumSize"),
     };
     format!(
-        "$p = New-Partition -DiskNumber {disk} {extent} -GptType {guid}; \
+        "{create} -GptType {guid}; \
          $p | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Lifeboat' -Confirm:$false | Out-Null; \
          $p = Get-Partition -DiskNumber {disk} -PartitionNumber $p.PartitionNumber; \
          $g = [string]$p.Guid; \
@@ -160,6 +168,19 @@ fn is_guid(s: &str) -> bool {
 }
 
 /// Run the creation script and resolve the new partition's volume.
+/// How far below the requested size a new partition may come out (alignment loss).
+pub const SIZE_SLACK: u64 = 16 * 1024 * 1024;
+
+/// Largest unallocated stretch on `disk`, in bytes. Read-only.
+pub(crate) fn largest_free(disk: u32) -> Result<u64> {
+    ps::run(&format!(
+        "[uint64](Get-Disk -Number {disk}).LargestFreeExtent"
+    ))?
+    .trim()
+    .parse()
+    .map_err(|e: std::num::ParseIntError| Error::Parse(e.to_string()))
+}
+
 pub(crate) fn create_and_find(disk: u32, size: Option<u64>) -> Result<PreparedVolume> {
     let out = ps::run(&create_partition_script(disk, size))?;
     let guid = parse_created_guid(&out)?;
@@ -292,7 +313,7 @@ mod tests {
         assert!(s.contains("0xC000000000000000"), "{s}");
         assert!(s.contains("'lifeboat.id'"));
         assert!(s.contains("Format-Volume -FileSystem NTFS"));
-        assert!(create_partition_script(7, Some(123)).contains("-Size 123 "));
+        assert!(create_partition_script(7, Some(123)).contains("[Math]::Min([uint64]123, $f)"));
     }
 
     #[test]
