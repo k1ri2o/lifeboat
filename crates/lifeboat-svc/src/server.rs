@@ -156,6 +156,11 @@ fn password_gate(cfg: &Config, ctx: &RateLimiter, password: &str) -> Result<(), 
     gate(ctx, Instant::now(), || verify_password(cfg, password))
 }
 
+/// True when restic said the repository is not there (exit code 10), not that it failed.
+fn repo_missing(message: &str) -> bool {
+    message.contains("repository does not exist")
+}
+
 fn refused(r: Refusal) -> Response {
     err(r)
 }
@@ -866,8 +871,12 @@ fn dispatch(
             // First setup: no repository exists yet, so there is no password to check. Once
             // one exists, preparing another disk needs it.
             if !cfg.repo.as_os_str().is_empty() {
-                if let Err(r) = password_gate(&cfg, limiter, &password) {
-                    return refused(r);
+                match password_gate(&cfg, limiter, &password) {
+                    Ok(()) => {}
+                    // A setup that stopped before the backup was created leaves a repo path
+                    // but no repository: treat it as a first setup.
+                    Err(Refusal::Unavailable(m)) if repo_missing(&m) => {}
+                    Err(r) => return refused(r),
                 }
             }
             match (st.prepare)(disk, mode) {
@@ -1038,6 +1047,16 @@ pub async fn serve_default(st: Arc<State>, stop: watch::Receiver<bool>) -> io::R
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn repo_missing_matches_restic_exit_10_only() {
+        let seen = r"restic failed (Some(10)): Fatal: repository does not exist: unable to open config file: GetFileAttributesEx \\?\Volume{x}\repo\config: The system cannot find the path specified.";
+        assert!(repo_missing(seen));
+        assert!(!repo_missing(
+            "restic failed (Some(1)): wrong password or no key found"
+        ));
+        assert!(!repo_missing("backup repository is not configured"));
+    }
 
     fn state_with(cfg: Config, dir: &std::path::Path) -> State {
         let mut st = State::new(
