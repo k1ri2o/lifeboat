@@ -156,7 +156,7 @@ export const api = {
     call<number>("resize_lifeboat", { password, newSize }),
   /** Delete Lifeboat for good. `confirm` must be the word DELETE. */
   removeLifeboat: (password: string, confirm: string) =>
-    call<void>("remove_lifeboat", { password, confirm }),
+    call<string>("remove_lifeboat", { password, confirm }),
   openFolder: (path: string) => call<void>("open_folder", { path }),
   isAdmin: () => call<boolean>("is_admin"),
   relaunchAsAdmin: () => call<void>("relaunch_as_admin"),

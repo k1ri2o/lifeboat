@@ -138,7 +138,7 @@ export async function installMock(mode: string): Promise<void> {
         if (a.confirm !== "DELETE") throw { kind: "service", message: "Type DELETE to confirm." };
         await wait(800);
         folders = [];
-        return null;
+        return "";
       case "open_folder":
         return null;
       case "is_admin":

@@ -232,10 +232,18 @@ pub struct RemovePlan {
     pub host_letter: Option<char>,
 }
 
+/// USB and other removable buses (SD cards, 1394) count as external.
+fn is_removable_bus(bus: &str) -> bool {
+    let b = bus.to_ascii_lowercase();
+    b.contains("usb") || b.contains("sd") || b.contains("mmc") || b.contains("1394")
+}
+
 impl RemovePlan {
     pub fn build(disk: &DiskInfo, guid: &str) -> Result<Self> {
         let lb = lifeboat_of(disk, guid)?;
-        let host = if disk.is_shared() {
+        // Only an internal disk gives space back to a neighbour: on a USB or other removable
+        // disk the partition in front is somebody's data drive, never ours to grow.
+        let host = if disk.is_shared() && !is_removable_bus(&disk.bus_type) {
             disk.partitions
                 .iter()
                 .filter(|p| {
@@ -298,7 +306,15 @@ pub fn remove_lifeboat(guid: &str) -> Result<RemoveOutcome> {
     check(&disk, Op::RemoveLifeboat, false)?;
     let plan = RemovePlan::build(&disk, guid)?;
     let own = (!disk.is_shared()).then_some(&disk);
-    if open_volume(guid, own)?.is_none() {
+    let opened = match open_volume(guid, own) {
+        Ok(v) => v,
+        Err(e) => {
+            // Re-hide / offline the disk also when opening failed half way.
+            let _ = close_volume(guid, own);
+            return Err(e);
+        }
+    };
+    if opened.is_none() {
         let _ = close_volume(guid, own);
         return Err(Error::NotFound(
             "the Lifeboat volume (or its marker file does not match)".into(),
@@ -497,6 +513,31 @@ mod tests {
             ],
         );
         assert_eq!(RemovePlan::build(&far, LB).unwrap().host_guid, None);
+    }
+
+    #[test]
+    fn remove_never_extends_a_host_on_a_usb_disk() {
+        let mut d = disk(
+            500 * G,
+            vec![
+                part(1, MIB, 100 * G, Some('D'), HOST),
+                part(2, 100 * G + MIB, 50 * G, None, LB),
+            ],
+        );
+        assert!(RemovePlan::build(&d, LB).unwrap().host_guid.is_some());
+        for bus in ["USB", "usb", "SD", "MMC", "1394"] {
+            d.bus_type = bus.into();
+            let p = RemovePlan::build(&d, LB).unwrap();
+            assert_eq!(p.host_guid, None, "{bus}");
+            assert_eq!(p.host_letter, None, "{bus}");
+        }
+        for bus in ["SATA", "NVMe", "RAID"] {
+            d.bus_type = bus.into();
+            assert!(
+                RemovePlan::build(&d, LB).unwrap().host_guid.is_some(),
+                "{bus}"
+            );
+        }
     }
 
     #[test]

@@ -1082,17 +1082,31 @@ function deleteLifeboatDialog() {
     ok.disabled = !deleteWordOk(word.value);
   };
   word.addEventListener("input", sync);
+  let removed = false;
+  const leave = () => {
+    close();
+    go("setup");
+  };
   const run = async () => {
+    if (removed) return leave();
     if (!deleteWordOk(word.value)) return;
     ok.disabled = true;
     msg.replaceChildren();
     try {
-      await api.removeLifeboat(pw.value, word.value);
-      close();
+      const note = await api.removeLifeboat(pw.value, word.value);
       invalidate("home");
       wiz.step = 1;
       wiz.disk = undefined;
-      go("setup");
+      if (note) {
+        // Deleted, but something needs the user's attention: show it before leaving.
+        removed = true;
+        msg.replaceChildren(h("p", { class: "note" }, note));
+        ok.textContent = "Continue";
+        ok.disabled = false;
+        cancel.hidden = true;
+      } else {
+        leave();
+      }
     } catch (e) {
       msg.replaceChildren(errorBox(e));
       sync();

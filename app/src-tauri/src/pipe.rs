@@ -233,14 +233,15 @@ pub fn resize_lifeboat(pipe: &str, password: &str, new_size: u64) -> Result<u64,
     }
 }
 
-/// Delete the Lifeboat partition for good. `confirm` must be the word DELETE.
-pub fn remove_lifeboat(pipe: &str, password: &str, confirm: &str) -> Result<(), ApiError> {
+/// Delete the Lifeboat partition for good. `confirm` must be the word DELETE. Returns a note
+/// for the user (empty when everything went fine).
+pub fn remove_lifeboat(pipe: &str, password: &str, confirm: &str) -> Result<String, ApiError> {
     let req = Request::RemoveLifeboat {
         password: password.to_string(),
         confirm: confirm.to_string(),
     };
     match call(pipe, &req)? {
-        Response::Done => Ok(()),
+        Response::Removed { note } => Ok(note),
         r => Err(unexpected(r)),
     }
 }
@@ -550,7 +551,9 @@ mod tests {
                 reason: String::new(),
             },
             Request::ResizeLifeboat { new_size, .. } => Response::Resized { new_size },
-            Request::RemoveLifeboat { confirm, .. } if confirm == "DELETE" => Response::Done,
+            Request::RemoveLifeboat { confirm, .. } if confirm == "DELETE" => Response::Removed {
+                note: "space note".into(),
+            },
             Request::RemoveLifeboat { .. } => Response::Error {
                 message: "type DELETE to confirm deleting Lifeboat".into(),
             },
@@ -564,9 +567,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 20);
-        on_thread(move || remove_lifeboat(&p2, "pw", "DELETE"))
+        let note = on_thread(move || remove_lifeboat(&p2, "pw", "DELETE"))
             .await
             .unwrap();
+        assert_eq!(note, "space note");
         let err = on_thread(move || remove_lifeboat(&p3, "pw", "nope"))
             .await
             .unwrap_err();

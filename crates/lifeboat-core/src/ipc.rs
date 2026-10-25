@@ -263,6 +263,12 @@ pub enum Response {
     Resized {
         new_size: u64,
     },
+    /// `RemoveLifeboat` finished. `note` is empty, or says what could not be finished (for
+    /// example the freed space could not be given back to the drive in front).
+    Removed {
+        #[serde(default)]
+        note: String,
+    },
     Error {
         message: String,
     },
@@ -434,6 +440,9 @@ mod tests {
                 reason: String::new(),
             },
             Response::Resized { new_size: 20 },
+            Response::Removed {
+                note: "careful".into(),
+            },
         ] {
             let s = serde_json::to_string(&r).unwrap();
             assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);

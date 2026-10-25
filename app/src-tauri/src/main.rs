@@ -152,7 +152,7 @@ async fn resize_lifeboat(password: String, new_size: u64) -> Result<u64, ApiErro
 
 /// Delete Lifeboat for good. Needs the password and the word DELETE.
 #[tauri::command]
-async fn remove_lifeboat(password: String, confirm: String) -> Result<(), ApiError> {
+async fn remove_lifeboat(password: String, confirm: String) -> Result<String, ApiError> {
     if password.is_empty() {
         return Err(ApiError::other(
             "Please type your Lifeboat password or recovery key.",
