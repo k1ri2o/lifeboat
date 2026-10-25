@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { friendlyError } from "./friendly";
+import { friendlyError, needsAdmin } from "./friendly";
 
 const BANNED = /snapshot|repo|restic|canary|prune|retention|freeze|pipe|service|os error/i;
 
@@ -21,6 +21,9 @@ describe("friendlyError", () => {
   });
   it("maps administrator and password problems", () => {
     expect(friendlyError({ kind: "service", message: "needs administrator" }).title).toMatch(/administrator/);
+    expect(friendlyError({ kind: "service", message: "needs administrator" }).next).toMatch(/Restart as administrator/);
+    expect(needsAdmin({ kind: "service", message: "needs administrator" })).toBe(true);
+    expect(needsAdmin({ kind: "other", message: "nope" })).toBe(false);
     expect(friendlyError({ kind: "service", message: "That password is not right. Please try again." }).title).toMatch(
       /password is not right/,
     );

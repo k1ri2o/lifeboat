@@ -1,5 +1,6 @@
 // Small UI helpers: a tiny DOM builder, inline SVG icons, and the friendly error box.
-import { friendlyError } from "./friendly";
+import { friendlyError, needsAdmin } from "./friendly";
+import { api, toApiError } from "./api";
 
 export type Child = Node | string | null | undefined | false;
 export type Attrs = Record<string, string | boolean | ((e: Event) => void)>;
@@ -35,6 +36,9 @@ const PATHS = {
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   refresh: '<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/>',
   lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  file: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/>',
+  vault: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5V10M12 14v1.5M8.5 12H10M14 12h1.5"/>',
+  chevron: '<path d="M9 6l6 6-6 6"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.1"/>',
 } as const;
 
@@ -56,6 +60,28 @@ export function button(label: string, opts: { cls?: string; icon?: IconName; onc
   return h("button", attrs, opts.icon ? icon(opts.icon, 18) : null, h("span", {}, label)) as HTMLButtonElement;
 }
 
+/** A small spinning wheel with text, for any wait on the service. */
+export function spinner(text: string): HTMLElement {
+  return h("div", { class: "loading", role: "status", "aria-live": "polite" }, h("span", { class: "spinner", "aria-hidden": "true" }), h("span", {}, text));
+}
+
+/** "Restart as administrator" button. If the user says No in Windows, a friendly note appears beside it. */
+export function adminButton(label = "Restart as administrator"): HTMLElement {
+  const note = h("div", { "aria-live": "polite" });
+  const b = button(label, { cls: "primary", icon: "shield" });
+  b.addEventListener("click", async () => {
+    b.disabled = true;
+    note.replaceChildren();
+    try {
+      await api.relaunchAsAdmin();
+    } catch (e) {
+      note.replaceChildren(h("p", { class: "muted" }, friendlyError(toApiError(e)).title));
+      b.disabled = false;
+    }
+  });
+  return h("div", { class: "admin-restart" }, b, note);
+}
+
 /** A friendly error: what happened, what to do, and the raw text behind a small "Details" toggle. */
 export function errorBox(e: unknown, onRetry?: () => void): HTMLElement {
   const f = friendlyError(e);
@@ -69,6 +95,7 @@ export function errorBox(e: unknown, onRetry?: () => void): HTMLElement {
       h("p", { class: "notice-title" }, f.title),
       h("p", { class: "muted" }, f.next),
       f.details ? h("details", {}, h("summary", {}, "Details"), h("pre", {}, f.details)) : null,
+      needsAdmin(e) ? adminButton() : null,
       onRetry ? button("Try again", { icon: "refresh", onclick: onRetry }) : null,
     ),
   );

@@ -68,6 +68,59 @@ export function sizeLabel(bytes: number): string {
   return `${gb.toFixed(1)} GB`;
 }
 
+/** Plain sizes for single files and folders: "532 bytes", "48 KB", "3.2 MB", "1.5 GB". */
+export function smallSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${Math.round(bytes)} bytes`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb >= 10 ? Math.round(kb) : kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB`;
+  return sizeLabel(bytes);
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** "today 14:05", "yesterday 09:30", "Tuesday 14:05" or "3 March 14:05". */
+export function dayTime(d: Date, now: Date = new Date()): string {
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOf(now) - startOf(d)) / 86400000);
+  if (days === 0) return `today ${hm}`;
+  if (days === 1) return `yesterday ${hm}`;
+  if (days > 1 && days < 7) return `${d.toLocaleDateString("en-GB", { weekday: "long" })} ${hm}`;
+  return `${d.getDate()} ${d.toLocaleDateString("en-GB", { month: "long" })}${d.getFullYear() === now.getFullYear() ? "" : " " + d.getFullYear()} ${hm}`;
+}
+
+/** "Last backup: today 14:05" (secs = unix seconds). */
+export function lastBackupStamp(secs: number | null | undefined, now: Date = new Date()): string {
+  if (secs == null) return "Last backup: none yet";
+  return `Last backup: ${dayTime(new Date(secs * 1000), now)}`;
+}
+
+/** "12 saved versions". */
+export function versionCountLine(n: number): string {
+  return n === 1 ? "1 saved version" : `${n} saved versions`;
+}
+
+/** Date part only, for lists: "today", "yesterday", "3 March 2026". Empty for an unknown date. */
+export function plainDate(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso);
+  if (!iso || Number.isNaN(d.getTime())) return "";
+  const t = dayTime(d, now);
+  return t.replace(/ \d\d:\d\d$/, "");
+}
+
+/** The last piece of a path. */
+export function baseName(path: string): string {
+  return path.split(/[\\/]+/).filter(Boolean).pop() ?? path;
+}
+
+/** Folder name for a new restore: "Lifeboat restore 2026-10-25". */
+export function restoreFolderName(now: Date = new Date()): string {
+  return `Lifeboat restore ${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
 /** "Last backup: 10 minutes ago", or a plain note when there has been none. `secs` = unix seconds. */
 export function lastBackupLine(secs: number | null | undefined, now: Date = new Date()): string {
   if (secs == null) return "Last backup: none yet";
