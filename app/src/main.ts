@@ -19,6 +19,8 @@ import {
   sizeLabel,
   snapshotLabel,
   inlineTimeLabel,
+  hasLifeboatPartition,
+  madeOnNote,
 } from "./format";
 import { adminButton, button, errorBox, h, icon, setLabel, skeleton, spinner, type Child } from "./ui";
 import { fetchFresh, guard, invalidate, peek, sig, swr } from "./cache";
@@ -589,7 +591,7 @@ async function renderRestore(body: HTMLElement, home: HomeState, alive: () => bo
           "label",
           { class: `choice${v.id === chosen ? " selected" : ""}`, for: `v-${v.id}` },
           radio,
-          h("span", { class: "grow" }, h("span", { class: "choice-title" }, snapshotLabel(v.time)), h("span", { class: "muted small" }, relativeTime(v.time))),
+          h("span", { class: "grow" }, h("span", { class: "choice-title" }, snapshotLabel(v.time)), h("span", { class: "muted small" }, [relativeTime(v.time), madeOnNote(v.hostname)].filter(Boolean).join(" - "))),
           isSafe ? h("span", { class: "pill ok" }, "Last good copy") : null,
         );
       }),
@@ -878,7 +880,11 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
     const d = wiz.disk;
     next.disabled = !d;
     if (!d) return detail.replaceChildren();
-    if (diskKind(d) === "external") {
+    if (hasLifeboatPartition(d) && diskKind(d) === "external") {
+      wiz.erase = true;
+      next.disabled = false;
+      detail.replaceChildren(h("div", { class: "notice info" }, icon("info", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Existing Lifeboat drive"), h("p", { class: "muted" }, "This drive already holds Lifeboat backups. Nothing on it will be erased. Next you will type the password it was made with, and you can restore the old backups here."))));
+    } else if (diskKind(d) === "external") {
       const cb = h("input", { type: "checkbox", id: "erase", checked: wiz.erase }) as HTMLInputElement;
       cb.addEventListener("change", () => ((wiz.erase = cb.checked), (next.disabled = !wiz.erase)));
       next.disabled = !wiz.erase;
@@ -913,6 +919,7 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
       detail.replaceChildren(
         warn,
         parts.length > 1 ? h("p", { class: "muted" }, "Which part of this drive should Lifeboat take space from?") : "",
+        hasLifeboatPartition(d) ? h("div", { class: "notice info" }, icon("info", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Existing Lifeboat drive"), h("p", { class: "muted" }, "This drive already holds Lifeboat backups. Lifeboat will open them instead of making a new space."))) : "",
         where,
         h("div", { class: "fields" }, h("div", {}, h("label", { for: "gb" }, "How many GB should be set aside for backups?"), gb)),
         h("p", { class: "muted small" }, `Pick more than the folders you want to protect take up. It must fit in the free space on ${wiz.letter}:; if it does not, Lifeboat will tell you the most it can use.`),
@@ -935,8 +942,8 @@ async function drawStep1(body: HTMLElement, redraw: () => void) {
           { class: `choice${wiz.disk?.number === d.number ? " selected" : ""}`, for: `d-${d.number}` },
           radio,
           icon(ext ? "usb" : "drive", 24),
-          h("span", { class: "grow" }, h("span", { class: "choice-title" }, d.model || "Drive"), h("span", { class: "muted small" }, `${sizeLabel(d.size)} - ${ext ? "USB drive" : internalLabel(d)}${lettersOn(d).length ? ` (${lettersOn(d).map((p) => p.letter + ":").join(", ")})` : ""}`)),
-          ext ? h("span", { class: "pill ok" }, "Recommended") : null,
+          h("span", { class: "grow" }, h("span", { class: "choice-title" }, d.model || "Drive"), h("span", { class: "muted small" }, `${sizeLabel(d.size)} - ${ext ? "USB drive" : internalLabel(d)}${lettersOn(d).length ? ` (${lettersOn(d).map((p) => p.letter + ":").join(", ")})` : ""}`), hasLifeboatPartition(d) ? h("span", { class: "muted small" }, "Existing Lifeboat drive — open its backups") : null),
+          hasLifeboatPartition(d) ? h("span", { class: "pill ok" }, "Existing Lifeboat drive") : ext ? h("span", { class: "pill ok" }, "Recommended") : null,
         );
       }),
     );
@@ -989,6 +996,7 @@ function drawStep3(body: HTMLElement, redraw: () => void) {
   const go1 = button("Start protecting my files", { cls: "primary big", icon: "shield" });
   const back = button("Back", { onclick: () => ((wiz.step = 2), redraw()) });
   const external = wiz.disk ? diskKind(wiz.disk) === "external" : true;
+  const existing = wiz.disk ? hasLifeboatPartition(wiz.disk) : false;
   // The drive can be prepared while the final step fails: then only the last step is retried.
   let prepared = false;
 
@@ -1003,7 +1011,7 @@ function drawStep3(body: HTMLElement, redraw: () => void) {
     wiz.password = pw.value;
     wiz.password2 = pw2.value;
     if (pw.value.length < 8) return void msg.replaceChildren(errorBox({ kind: "other", message: "Your password needs at least 8 characters." }));
-    if (pw.value !== pw2.value) return void msg.replaceChildren(errorBox({ kind: "other", message: "The two passwords are not the same." }));
+    if (!existing && pw.value !== pw2.value) return void msg.replaceChildren(errorBox({ kind: "other", message: "The two passwords are not the same." }));
     msg.replaceChildren();
     go1.disabled = back.disabled = true;
     try {
@@ -1035,8 +1043,12 @@ function drawStep3(body: HTMLElement, redraw: () => void) {
   body.append(
     h("p", { class: "eyebrow" }, "Step 3 of 3"),
     stepper(3),
-    pageTitle("Choose a password", "You will need it to get your files back or to change your protection. Pick something you will remember, and write it down."),
-    h("div", { class: "card form" }, h("label", { for: "spw" }, "Password (at least 8 characters)"), pw, h("label", { for: "spw2" }, "Type it again"), pw2),
+    existing
+      ? pageTitle("Type the password this drive was made with", "This drive already holds Lifeboat backups. Type the password it was made with. The recovery key you wrote down also works here, in place of the password.")
+      : pageTitle("Choose a password", "You will need it to get your files back or to change your protection. Pick something you will remember, and write it down."),
+    existing
+      ? h("div", { class: "card form" }, h("label", { for: "spw" }, "Password or recovery key"), pw)
+      : h("div", { class: "card form" }, h("label", { for: "spw" }, "Password (at least 8 characters)"), pw, h("label", { for: "spw2" }, "Type it again"), pw2),
     msg,
     progress,
     h("div", { class: "actions split" }, back, go1),

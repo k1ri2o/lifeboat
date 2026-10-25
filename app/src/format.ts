@@ -185,3 +185,25 @@ export function inlineTimeLabel(iso: string, now: Date = new Date()): string {
   if (d) return `on ${d[1]} at ${d[2]}`;
   return label === "Unknown time" ? "an unknown time" : `on ${label}`;
 }
+
+const BASIC_DATA = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7";
+const MIN_LIFEBOAT_SIZE = 512 * 1024 * 1024;
+
+/** Does this drive already hold a Lifeboat partition? Mirrors PartitionInfo::is_lifeboat in the service. */
+export function hasLifeboatPartition(d: {
+  partitions: { size: number; gpt_type: string | null; drive_letter: string | null; is_hidden?: boolean; no_default_letter?: boolean }[];
+}): boolean {
+  return d.partitions.some(
+    (p) =>
+      (p.gpt_type ?? "").replace(/[{}]/g, "").toLowerCase() === BASIC_DATA &&
+      p.size >= MIN_LIFEBOAT_SIZE &&
+      !!(p.is_hidden || p.no_default_letter) &&
+      !p.drive_letter,
+  );
+}
+
+/** "Made on OLD-PC" for a backup that names the PC it came from, else empty. */
+export function madeOnNote(hostname: string | undefined): string {
+  const h = (hostname ?? "").trim();
+  return h ? `Made on ${h}` : "";
+}

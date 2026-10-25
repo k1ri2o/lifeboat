@@ -510,20 +510,27 @@ fn top_paths(s: &Snapshot) -> Vec<String> {
         .collect()
 }
 
+/// Backups for the Restore list: every normal snapshot in the repository, whichever PC made
+/// it (there is no host filter, so a drive opened on a new PC shows the old PC's backups),
+/// with the name of the PC that made each one.
+fn visible_snapshots(v: Vec<Snapshot>) -> Vec<SnapshotInfo> {
+    v.into_iter()
+        .filter(|s| !is_vault(s))
+        .map(|s| SnapshotInfo {
+            id: s.id,
+            short_id: s.short_id,
+            time: s.time,
+            paths: s.paths,
+            hostname: s.hostname,
+        })
+        .collect()
+}
+
 fn list_snapshots(c: &Config, caches: &Caches) -> Result<Response, String> {
     let e = engine(c)?;
     let v = all_snapshots(&e, c, caches)?;
     Ok(Response::Snapshots {
-        snapshots: v
-            .into_iter()
-            .filter(|s| !is_vault(s))
-            .map(|s| SnapshotInfo {
-                id: s.id,
-                short_id: s.short_id,
-                time: s.time,
-                paths: s.paths,
-            })
-            .collect(),
+        snapshots: visible_snapshots(v),
     })
 }
 
@@ -1105,6 +1112,25 @@ pub async fn serve_default(st: Arc<State>, stop: watch::Receiver<bool>) -> io::R
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn restore_list_includes_other_pcs_and_names_them() {
+        let snap = |id: &str, host: &str, tags: &[&str]| Snapshot {
+            id: id.into(),
+            short_id: id.into(),
+            time: "2026-01-01T10:00:00Z".into(),
+            paths: vec![],
+            hostname: host.into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+        };
+        let v = visible_snapshots(vec![
+            snap("a", "THIS-PC", &[]),
+            snap("b", "OLD-PC", &[]),
+            snap("c", "OLD-PC", &[lifeboat_engine::VAULT_TAG]),
+        ]);
+        let hosts: Vec<&str> = v.iter().map(|s| s.hostname.as_str()).collect();
+        assert_eq!(hosts, ["THIS-PC", "OLD-PC"]);
+    }
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
