@@ -10,6 +10,12 @@ export interface StatusInfo {
   frozen_since: string | null;
   /** Unix seconds of the last successful backup. */
   last_run: number | null;
+  /** Backups waiting to be deleted (id and due time in unix seconds). */
+  pending_deletes?: PendingDelete[];
+}
+export interface PendingDelete {
+  id: string;
+  due: number;
 }
 export interface HomeState {
   status: StatusInfo;
@@ -80,6 +86,10 @@ export const api = {
   /** Restore `paths` of a version (empty list = everything). Resolves to the folder used. */
   restore: (snapshot: string, target: string, password: string, paths: string[] = []) =>
     call<string>("restore", { snapshot, target, password, paths }),
+  /** Queue backups for deletion (the service waits 7 days). */
+  deleteSnapshots: (password: string, ids: string[]) => call<void>("delete_snapshots", { password, ids }),
+  /** Cancel every queued delete. */
+  cancelDelete: (password: string) => call<void>("cancel_delete", { password }),
   /** One level of a version's files. `path` omitted = the top. */
   listFiles: (snapshot: string, path?: string) =>
     call<FileEntry[]>("list_files", { snapshot, path: path ?? null }),

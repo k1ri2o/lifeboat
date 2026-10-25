@@ -100,6 +100,31 @@ async fn restore(
     blocking(move || pipe::restore(PIPE_NAME, &snapshot, &target, &password, paths)).await
 }
 
+/// Queue backups for deletion. They are removed after the service's delay (7 days).
+#[tauri::command]
+async fn delete_snapshots(password: String, ids: Vec<String>) -> Result<(), ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other(
+            "Please type your Lifeboat password or recovery key.",
+        ));
+    }
+    if ids.is_empty() {
+        return Err(ApiError::other("Please choose a backup to delete."));
+    }
+    blocking(move || pipe::delete_snapshots(PIPE_NAME, &password, ids)).await
+}
+
+/// Cancel every queued delete.
+#[tauri::command]
+async fn cancel_delete(password: String) -> Result<(), ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other(
+            "Please type your Lifeboat password or recovery key.",
+        ));
+    }
+    blocking(move || pipe::cancel_delete(PIPE_NAME, &password)).await
+}
+
 #[tauri::command]
 async fn list_files(snapshot: String, path: Option<String>) -> Result<Vec<FileEntry>, ApiError> {
     blocking(move || pipe::list_files(PIPE_NAME, &snapshot, path)).await
@@ -353,6 +378,8 @@ fn main() {
             backup_now,
             list_snapshots,
             restore,
+            delete_snapshots,
+            cancel_delete,
             list_disks,
             prepare_disk,
             add_folder,

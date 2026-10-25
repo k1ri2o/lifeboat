@@ -21,6 +21,10 @@ import {
   inlineTimeLabel,
   hasLifeboatPartition,
   madeOnNote,
+  deleteConfirmText,
+  deleteDueDate,
+  deletesOnLine,
+  pendingFor,
 } from "./format";
 import { adminButton, button, errorBox, h, icon, setLabel, skeleton, spinner, type Child } from "./ui";
 import { fetchFresh, guard, invalidate, peek, sig, swr } from "./cache";
@@ -132,7 +136,7 @@ function isFirstRun(st: HomeState): boolean {
 // ---------- Password dialog ----------
 
 /** Ask for the Lifeboat password. If `submit` throws, the friendly message appears in the dialog. */
-function askPassword(title: string, text: string, submit: (password: string) => Promise<void>): void {
+function askPassword(title: string, text: string, submit: (password: string) => Promise<void>, fieldLabel = "Your Lifeboat password"): void {
   const pw = h("input", { type: "password", id: "dlg-pw", autocomplete: "off" }) as HTMLInputElement;
   const msg = h("div", { "aria-live": "polite" });
   const ok = button("Continue", { cls: "primary" });
@@ -142,7 +146,7 @@ function askPassword(title: string, text: string, submit: (password: string) => 
     { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "dlg-title" },
     h("h2", { id: "dlg-title" }, title),
     h("p", { class: "muted" }, text),
-    h("label", { for: "dlg-pw" }, "Your Lifeboat password"),
+    h("label", { for: "dlg-pw" }, fieldLabel),
     pw,
     msg,
     h("div", { class: "actions" }, ok, cancel),
@@ -580,6 +584,57 @@ async function renderRestore(body: HTMLElement, home: HomeState, alive: () => bo
   };
 
   const list = h("div", { class: "choices", role: "radiogroup", "aria-label": "Backup times" });
+  // Backups waiting to be deleted. Updated here after a delete or cancel so the screen is right at once.
+  let pending = [...(home.status.pending_deletes ?? [])];
+  const pendingBar = h("div", { "aria-live": "polite" });
+  const drawPending = () => {
+    if (!pending.length) return pendingBar.replaceChildren();
+    const n = pending.length;
+    pendingBar.replaceChildren(
+      h(
+        "div",
+        { class: "notice warn" },
+        icon("alert", 22),
+        h(
+          "div",
+          { class: "notice-body" },
+          h("p", { class: "notice-title" }, n === 1 ? "1 backup will be deleted" : `${n} backups will be deleted`),
+          h("p", { class: "muted" }, "You can cancel until the date shown next to each one. Cancelling stops all waiting deletes, not just one."),
+          button("Cancel delete", {
+            onclick: () =>
+              askPassword(
+                "Cancel delete",
+                `This stops all ${n === 1 ? "the waiting delete" : `${n} waiting deletes`}. Your backups stay as they are.`,
+                async (password) => {
+                  await api.cancelDelete(password);
+                  pending = [];
+                  drawPending();
+                  drawVersions();
+                },
+                "Password or recovery key",
+              ),
+          }),
+        ),
+      ),
+    );
+  };
+  const askDelete = (v: Version) =>
+    askPassword(
+      "Delete this backup",
+      `${snapshotLabel(v.time)}: ${deleteConfirmText()}`,
+      async (password) => {
+        await api.deleteSnapshots(password, [v.id]);
+        pending = [...pending.filter((p) => p.id !== v.id), { id: v.id, due: Math.floor(deleteDueDate().getTime() / 1000) }];
+        drawPending();
+        drawVersions();
+      },
+      "Password or recovery key",
+    );
+  const deleteBtn = (v: Version) => {
+    const b = button("Delete", { cls: "quiet", icon: "trash", onclick: () => askDelete(v) });
+    b.setAttribute("aria-label", `Delete the backup from ${snapshotLabel(v.time)}`);
+    return b;
+  };
   const drawVersions = () => {
     const shown = showAll ? versions : versions.slice(0, 8);
     list.replaceChildren(
@@ -587,21 +642,30 @@ async function renderRestore(body: HTMLElement, home: HomeState, alive: () => bo
         const isSafe = safe?.id === v.id;
         const radio = h("input", { type: "radio", name: "ver", id: `v-${v.id}`, checked: v.id === chosen });
         radio.addEventListener("change", () => pickVersion(v.id));
+        const queued = pendingFor(pending, v.id);
         return h(
-          "label",
-          { class: `choice${v.id === chosen ? " selected" : ""}`, for: `v-${v.id}` },
-          radio,
-          h("span", { class: "grow" }, h("span", { class: "choice-title" }, snapshotLabel(v.time)), h("span", { class: "muted small" }, [relativeTime(v.time), madeOnNote(v.hostname)].filter(Boolean).join(" - "))),
-          isSafe ? h("span", { class: "pill ok" }, "Last good copy") : null,
+          "div",
+          { style: "display:flex;align-items:center;gap:8px" },
+          h(
+            "label",
+            { class: `choice${v.id === chosen ? " selected" : ""}`, for: `v-${v.id}`, style: "flex:1" },
+            radio,
+            h("span", { class: "grow" }, h("span", { class: "choice-title" }, snapshotLabel(v.time)), h("span", { class: "muted small" }, [relativeTime(v.time), madeOnNote(v.hostname)].filter(Boolean).join(" - "))),
+            isSafe ? h("span", { class: "pill ok" }, "Last good copy") : null,
+            queued ? h("span", { class: "pill warn" }, deletesOnLine(queued.due)) : null,
+          ),
+          queued ? null : deleteBtn(v),
         );
       }),
       !showAll && versions.length > 8 ? button(`Show ${versions.length - 8} older`, { cls: "quiet", onclick: () => ((showAll = true), drawVersions()) }) : "",
     );
   };
   drawVersions();
+  drawPending();
   updateSummary();
 
   body.append(
+    pendingBar,
     frozenSince && safe
       ? h("div", { class: "notice warn" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Backups are paused"), h("p", { class: "muted" }, `We picked the last good copy, from ${inlineTimeLabel(safe.time)}, before the problem started.`)))
       : "",
