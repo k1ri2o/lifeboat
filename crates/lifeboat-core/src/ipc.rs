@@ -100,6 +100,10 @@ pub struct SnapshotInfo {
     pub short_id: String,
     pub time: String,
     pub paths: Vec<String>,
+    /// Name of the PC that made this backup (empty when unknown). Backups from another PC
+    /// show up after a drive is opened on a new computer.
+    #[serde(default)]
+    pub hostname: String,
 }
 
 /// One entry of a snapshot folder listing.
@@ -263,6 +267,7 @@ mod tests {
                 short_id: "a".into(),
                 time: "t".into(),
                 paths: vec![],
+                hostname: "OLD-PC".into(),
             }],
         };
         let s = serde_json::to_string(&r).unwrap();

@@ -20,6 +20,8 @@ export interface Snapshot {
   short_id: string;
   time: string;
   paths: string[];
+  /** Name of the PC that made this backup (empty when unknown). */
+  hostname?: string;
 }
 export interface Partition {
   number: number;
@@ -27,6 +29,8 @@ export interface Partition {
   size: number;
   gpt_type: string | null;
   drive_letter: string | null;
+  is_hidden?: boolean;
+  no_default_letter?: boolean;
 }
 export interface Disk {
   number: number;

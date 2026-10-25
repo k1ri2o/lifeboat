@@ -335,6 +335,7 @@ mod tests {
                     short_id: "abc".into(),
                     time: "2026-10-24T09:00:00Z".into(),
                     paths: vec![],
+                    hostname: String::new(),
                 }],
             },
             other => panic!("unexpected {other:?}"),

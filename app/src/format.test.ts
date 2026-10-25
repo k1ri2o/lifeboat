@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName } from "./format";
+import { folderParts, isStale, keyGroups, lastBackupLine, lastBefore, nextBackupLine, relativeTime, sizeLabel, snapshotLabel, inlineTimeLabel, smallSize, dayTime, lastBackupStamp, versionCountLine, plainDate, baseName, restoreFolderName, hasLifeboatPartition, madeOnNote } from "./format";
 
 // Local-time dates so the tests do not depend on the machine's time zone.
 const now = new Date(2026, 9, 24, 15, 0, 0); // Saturday 24 Oct 2026, 3 PM
@@ -129,5 +129,25 @@ describe("v0.1.8 plain-word helpers", () => {
     expect(baseName("C:\\Users\\Dad\\Pictures")).toBe("Pictures");
     expect(baseName("/C/Users/Dad/a.txt")).toBe("a.txt");
     expect(restoreFolderName(now)).toBe("Lifeboat restore 2026-10-25");
+  });
+});
+
+describe("existing Lifeboat drive", () => {
+  const big = 1024 ** 3;
+  const part = (o: object) => ({ size: big, gpt_type: "{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}", drive_letter: null, is_hidden: true, ...o });
+  it("spots a hidden basic-data partition without a letter", () => {
+    expect(hasLifeboatPartition({ partitions: [part({})] })).toBe(true);
+    expect(hasLifeboatPartition({ partitions: [part({ is_hidden: false, no_default_letter: true })] })).toBe(true);
+  });
+  it("ignores ordinary partitions", () => {
+    expect(hasLifeboatPartition({ partitions: [part({ drive_letter: "E:" })] })).toBe(false);
+    expect(hasLifeboatPartition({ partitions: [part({ is_hidden: false })] })).toBe(false);
+    expect(hasLifeboatPartition({ partitions: [part({ size: 1000 })] })).toBe(false);
+    expect(hasLifeboatPartition({ partitions: [] })).toBe(false);
+  });
+  it("names the PC a backup came from", () => {
+    expect(madeOnNote("OLD-PC")).toBe("Made on OLD-PC");
+    expect(madeOnNote("")).toBe("");
+    expect(madeOnNote(undefined)).toBe("");
   });
 });
