@@ -120,6 +120,24 @@ pub fn forget_ids_args(ids: &[String]) -> Vec<String> {
     v
 }
 
+/// Arguments to drop one path from a snapshot: `rewrite` writes a copy without it and, with
+/// `--forget`, forgets the original. The data is freed by a separate `prune`.
+pub fn rewrite_exclude_args(snapshot: &str, restic_path: &str) -> Vec<String> {
+    vec![
+        "rewrite".into(),
+        "--exclude".into(),
+        restic_path.into(),
+        "--forget".into(),
+        snapshot.into(),
+    ]
+}
+
+/// A path restic would read as an exclude pattern with wildcards; such a path cannot be
+/// removed with `rewrite --exclude` without risking more than the one item.
+pub fn has_pattern_chars(restic_path: &str) -> bool {
+    restic_path.contains(['*', '?', '['])
+}
+
 /// Parse the output of `restic snapshots --json`.
 pub fn parse_snapshots(json: &str) -> Result<Vec<Snapshot>, Error> {
     serde_json::from_str(json.trim()).map_err(|e| Error::Parse(e.to_string()))
@@ -720,6 +738,16 @@ impl Engine {
         self.run(forget_ids_args(ids)).map(|_| ())
     }
 
+    /// Remove one path from a snapshot (the snapshot is replaced by a copy without it) and
+    /// free the data. `restic_path` is the restic form (`/C/Users/x`).
+    pub fn rewrite_exclude(&self, snapshot: &str, restic_path: &str) -> Result<(), Error> {
+        if !valid_snapshot_id(snapshot) || has_pattern_chars(restic_path) {
+            return Err(Error::Parse(format!("cannot rewrite for {restic_path}")));
+        }
+        self.run(rewrite_exclude_args(snapshot, restic_path))?;
+        self.run(["prune"]).map(|_| ())
+    }
+
     /// Integrity check that also reads a 5% sample of the data.
     pub fn check_subset(&self) -> Result<(), Error> {
         self.run(check_subset_args()).map(|_| ())
@@ -907,6 +935,23 @@ mod tests {
         assert_eq!(names, ["Beta", "sub", "Alpha.txt", "zeta.txt"]);
         assert_eq!(kids[2].size, 7);
         assert_eq!(kids[2].mtime, "2026-01-01T10:00:00Z");
+    }
+
+    #[test]
+    fn rewrite_args_exclude_one_path_and_forget_the_original() {
+        let a = rewrite_exclude_args("abcd1234", "/C/Users/x/secret");
+        assert_eq!(
+            a,
+            [
+                "rewrite",
+                "--exclude",
+                "/C/Users/x/secret",
+                "--forget",
+                "abcd1234"
+            ]
+        );
+        assert!(has_pattern_chars("/C/a*b") && has_pattern_chars("/C/a[1]"));
+        assert!(!has_pattern_chars("/C/Users/x y"));
     }
 
     #[test]

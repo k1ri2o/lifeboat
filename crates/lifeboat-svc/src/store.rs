@@ -5,7 +5,7 @@
 //! stay as a test override (see [`env_override`]).
 
 use crate::dpapi;
-use lifeboat_core::config::{CheckResult, Config, PendingDelete};
+use lifeboat_core::config::{CheckResult, Config, PendingDelete, PendingVaultRemove};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -27,6 +27,8 @@ struct OnDisk {
     last_check: Option<CheckResult>,
     #[serde(default)]
     pending_deletes: Vec<PendingDelete>,
+    #[serde(default)]
+    pending_vault_removes: Vec<PendingVaultRemove>,
 }
 
 pub fn to_hex(b: &[u8]) -> String {
@@ -106,6 +108,7 @@ impl Store {
             last_run: d.last_run,
             last_check: d.last_check,
             pending_deletes: d.pending_deletes,
+            pending_vault_removes: d.pending_vault_removes,
         })
     }
 
@@ -128,6 +131,7 @@ impl Store {
             last_run: cfg.last_run,
             last_check: cfg.last_check.clone(),
             pending_deletes: cfg.pending_deletes.clone(),
+            pending_vault_removes: cfg.pending_vault_removes.clone(),
         };
         let json = serde_json::to_vec_pretty(&d)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -208,6 +212,11 @@ mod tests {
             pending_deletes: vec![PendingDelete {
                 id: "x".into(),
                 due: 9,
+            }],
+            pending_vault_removes: vec![PendingVaultRemove {
+                path: "C:/Secret".into(),
+                snapshot: "v1".into(),
+                due: 10,
             }],
         };
         s.save(&c).unwrap();

@@ -199,6 +199,10 @@ impl Env for SimEnv {
             .push(format!("forget {}", ids.join(",")));
         Ok(())
     }
+    fn vault_remove(&self, path: &str) -> Result<(), String> {
+        self.calls.borrow_mut().push(format!("vault_remove {path}"));
+        Ok(())
+    }
 }
 
 struct World {
@@ -492,6 +496,9 @@ fn normal_day_backs_up_and_does_not_freeze() {
             }
             fn forget(&self, ids: &[String]) -> Result<(), String> {
                 self.0.forget(ids)
+            }
+            fn vault_remove(&self, path: &str) -> Result<(), String> {
+                self.0.vault_remove(path)
             }
         }
         let n = NoRestic(env);

@@ -26,6 +26,9 @@ pub struct Config {
     /// Snapshot deletes waiting for their due time.
     #[serde(default)]
     pub pending_deletes: Vec<PendingDelete>,
+    /// Vault items waiting to be removed from the vault.
+    #[serde(default)]
+    pub pending_vault_removes: Vec<PendingVaultRemove>,
 }
 
 /// Result of an integrity check (`restic check`).
@@ -43,6 +46,18 @@ pub struct CheckResult {
 pub struct PendingDelete {
     pub id: String,
     /// Unix seconds when the delete may run.
+    pub due: u64,
+}
+
+/// A vault item removal queued with the same delay as a snapshot delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingVaultRemove {
+    /// The item's original Windows path ([`crate::ipc::VaultItem::path`]).
+    pub path: String,
+    /// The vault snapshot that held it when it was queued (the run looks the path up again,
+    /// because an earlier removal may have rewritten the snapshot).
+    pub snapshot: String,
+    /// Unix seconds when the removal may run.
     pub due: u64,
 }
 
@@ -70,6 +85,11 @@ mod tests {
                 id: "a".into(),
                 due: 7,
             }],
+            pending_vault_removes: vec![PendingVaultRemove {
+                path: "C:/x".into(),
+                snapshot: "s".into(),
+                due: 8,
+            }],
         };
         let s = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<Config>(&s).unwrap(), c);
@@ -80,5 +100,6 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"folders":[]}"#).unwrap();
         assert_eq!(c.last_run, 0);
         assert!(c.pending_deletes.is_empty());
+        assert!(c.pending_vault_removes.is_empty());
     }
 }
