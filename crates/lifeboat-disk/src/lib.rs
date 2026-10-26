@@ -24,6 +24,7 @@ pub use ops::{
     prepare_external, set_disk_offline, set_disk_online, PreparedVolume,
 };
 pub use plan::{execute_shrink, plan_shrink, ShrinkPlan};
+pub use move_grow::MovePlan;
 pub use resize::{grow_info, grow_lifeboat, remove_lifeboat, GrowInfo, RemoveOutcome, RemovePlan};
 
 /// Errors from disk operations.
