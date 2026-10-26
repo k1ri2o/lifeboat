@@ -1311,6 +1311,16 @@ fn lifeboat_guid(cfg: &Config) -> Result<&str, Response> {
 
 /// Read-only: size, fill level and how far Lifeboat can grow.
 fn lifeboat_size_info(st: &State, cfg: &Config) -> Response {
+    lifeboat_size_info_with(st, cfg, free_bytes)
+}
+
+/// Space in use is measured the same way as the Backup drive card
+/// (size minus free space), and only while Lifeboat is open.
+fn lifeboat_size_info_with(
+    st: &State,
+    cfg: &Config,
+    free: impl Fn(&str) -> Option<u64>,
+) -> Response {
     let guid = match lifeboat_guid(cfg) {
         Ok(g) => g,
         Err(r) => return r,
@@ -1318,7 +1328,12 @@ fn lifeboat_size_info(st: &State, cfg: &Config) -> Response {
     match (st.disk_ops.grow_info)(guid) {
         Ok(i) => Response::ResizeInfo {
             total: i.current_size,
-            used: i.used,
+            used: st
+                .ctx
+                .lease
+                .held_path()
+                .and_then(|v| free(&v))
+                .map(|f| i.current_size.saturating_sub(f)),
             max_size: i.max_size,
             can_grow: i.can_grow,
             reason: i.reason,
@@ -2390,12 +2405,32 @@ mod tests {
             call(r#"{"cmd":"LifeboatSizeInfo"}"#, &st, true),
             Response::ResizeInfo {
                 total: 10,
-                used: Some(4),
+                used: None, // closed: nothing to measure
                 max_size: 30,
                 can_grow: true,
                 reason: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn size_info_used_matches_the_drive_card_when_open() {
+        let d = tempfile::tempdir().unwrap();
+        let st = disk_state(d.path(), Arc::new(AtomicU32::new(0)));
+        let _v = st
+            .ctx
+            .lease
+            .acquire(|| Ok(crate::lease::Volume::new("X:\\".into(), || {})))
+            .unwrap();
+        let mut cfg = with_repo();
+        cfg.partition_guid = "{guid-1}".into();
+        match lifeboat_size_info_with(&st, &cfg, |_| Some(7)) {
+            Response::ResizeInfo { total, used, .. } => {
+                assert_eq!(total, 10);
+                assert_eq!(used, Some(3)); // size 10 minus 7 free
+            }
+            r => panic!("{r:?}"),
+        }
     }
 
     #[test]

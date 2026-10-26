@@ -146,10 +146,14 @@ export function usageLine(used: number | null | undefined, free: number | null |
   return `${sizeLabel(used)} used, ${sizeLabel(free)} free`;
 }
 
-/** A plain-English name for a drive's connection type. */
+/**
+ * A plain-English name for a drive's connection type, as Windows reports it.
+ * It never guesses "inside this computer": some USB boxes report SATA.
+ */
 export function busLabel(bus: string): string {
   if (/usb/i.test(bus)) return "USB drive";
-  if (/nvme|sata|ata|raid|scsi|sas/i.test(bus)) return "Inside this computer";
+  if (/nvme/i.test(bus)) return "NVMe drive";
+  if (/sata|^ata$/i.test(bus)) return "SATA drive";
   return "Drive";
 }
 

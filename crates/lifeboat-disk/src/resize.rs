@@ -47,7 +47,8 @@ pub struct GrowInfo {
     pub can_grow: bool,
     /// Plain-English reason when `can_grow` is false; empty otherwise.
     pub reason: String,
-    /// Approximate space in use (Windows' minimum supported size), when Windows could tell.
+    /// The smallest size Windows could shrink this partition to (its data plus a safety
+    /// margin). Not the space in use: the service measures that from the free space.
     pub used: Option<u64>,
 }
 

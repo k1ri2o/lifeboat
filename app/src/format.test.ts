@@ -93,7 +93,10 @@ describe("drive usage", () => {
   });
   it("names bus types plainly", () => {
     expect(busLabel("USB")).toBe("USB drive");
-    expect(busLabel("NVMe")).toBe("Inside this computer");
+    expect(busLabel("NVMe")).toBe("NVMe drive");
+    expect(busLabel("SATA")).toBe("SATA drive");
+    expect(busLabel("ATA")).toBe("SATA drive");
+    expect(busLabel("RAID")).toBe("Drive");
     expect(busLabel("Weird")).toBe("Drive");
   });
 });
