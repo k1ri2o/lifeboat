@@ -11,6 +11,7 @@ pub mod guard;
 pub mod ops;
 pub mod plan;
 mod ps;
+pub mod resize;
 
 pub use acl::{lock_down, lock_down_args};
 pub use guard::{check, GuardError, Op};
@@ -22,6 +23,7 @@ pub use ops::{
     prepare_external, set_disk_offline, set_disk_online, PreparedVolume,
 };
 pub use plan::{execute_shrink, plan_shrink, ShrinkPlan};
+pub use resize::{grow_info, grow_lifeboat, remove_lifeboat, GrowInfo, RemoveOutcome, RemovePlan};
 
 /// Errors from disk operations.
 #[derive(Debug)]

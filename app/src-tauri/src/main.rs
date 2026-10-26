@@ -135,6 +135,32 @@ async fn vault_remove(password: String, paths: Vec<String>) -> Result<(), ApiErr
     blocking(move || pipe::vault_remove(PIPE_NAME, &password, paths)).await
 }
 
+/// How big the Lifeboat partition is, and how far it can grow.
+#[tauri::command]
+async fn lifeboat_size_info() -> Result<pipe::SizeInfo, ApiError> {
+    blocking(move || pipe::lifeboat_size_info(PIPE_NAME)).await
+}
+
+/// Grow the Lifeboat partition. Needs the password.
+#[tauri::command]
+async fn resize_lifeboat(password: String, new_size: u64) -> Result<u64, ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other("Please type your Lifeboat password."));
+    }
+    blocking(move || pipe::resize_lifeboat(PIPE_NAME, &password, new_size)).await
+}
+
+/// Delete Lifeboat for good. Needs the password and the word DELETE.
+#[tauri::command]
+async fn remove_lifeboat(password: String, confirm: String) -> Result<String, ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other(
+            "Please type your Lifeboat password or recovery key.",
+        ));
+    }
+    blocking(move || pipe::remove_lifeboat(PIPE_NAME, &password, &confirm)).await
+}
+
 /// Cancel every queued delete.
 #[tauri::command]
 async fn cancel_delete(password: String) -> Result<(), ApiError> {
@@ -403,6 +429,9 @@ fn main() {
             delete_snapshots,
             cancel_delete,
             vault_remove,
+            lifeboat_size_info,
+            resize_lifeboat,
+            remove_lifeboat,
             list_disks,
             prepare_disk,
             add_folder,

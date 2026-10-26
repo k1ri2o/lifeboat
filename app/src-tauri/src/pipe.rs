@@ -192,6 +192,60 @@ pub fn vault_remove(pipe: &str, password: &str, paths: Vec<String>) -> Result<()
     }
 }
 
+/// How big the Lifeboat partition is and how far it can grow (#54).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SizeInfo {
+    pub total: u64,
+    pub used: Option<u64>,
+    pub max_size: u64,
+    pub can_grow: bool,
+    pub reason: String,
+}
+
+pub fn lifeboat_size_info(pipe: &str) -> Result<SizeInfo, ApiError> {
+    match call(pipe, &Request::LifeboatSizeInfo)? {
+        Response::ResizeInfo {
+            total,
+            used,
+            max_size,
+            can_grow,
+            reason,
+        } => Ok(SizeInfo {
+            total,
+            used,
+            max_size,
+            can_grow,
+            reason,
+        }),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Grow the Lifeboat partition to `new_size` bytes. Returns the size it now has.
+pub fn resize_lifeboat(pipe: &str, password: &str, new_size: u64) -> Result<u64, ApiError> {
+    let req = Request::ResizeLifeboat {
+        password: password.to_string(),
+        new_size,
+    };
+    match call(pipe, &req)? {
+        Response::Resized { new_size } => Ok(new_size),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Delete the Lifeboat partition for good. `confirm` must be the word DELETE. Returns a note
+/// for the user (empty when everything went fine).
+pub fn remove_lifeboat(pipe: &str, password: &str, confirm: &str) -> Result<String, ApiError> {
+    let req = Request::RemoveLifeboat {
+        password: password.to_string(),
+        confirm: confirm.to_string(),
+    };
+    match call(pipe, &req)? {
+        Response::Removed { note } => Ok(note),
+        r => Err(unexpected(r)),
+    }
+}
+
 /// Cancel every queued delete.
 pub fn cancel_delete(pipe: &str, password: &str) -> Result<(), ApiError> {
     let req = Request::CancelDelete {
@@ -483,6 +537,44 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.message, "That password is not right. Please try again.");
+        h.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resize_and_remove_roundtrip() {
+        let (pipe, h) = fake_server("resizerm", 4, |req| match req {
+            Request::LifeboatSizeInfo => Response::ResizeInfo {
+                total: 10,
+                used: Some(4),
+                max_size: 30,
+                can_grow: true,
+                reason: String::new(),
+            },
+            Request::ResizeLifeboat { new_size, .. } => Response::Resized { new_size },
+            Request::RemoveLifeboat { confirm, .. } if confirm == "DELETE" => Response::Removed {
+                note: "space note".into(),
+            },
+            Request::RemoveLifeboat { .. } => Response::Error {
+                message: "type DELETE to confirm deleting Lifeboat".into(),
+            },
+            other => panic!("unexpected {other:?}"),
+        });
+        let (p1, p2, p3) = (pipe.clone(), pipe.clone(), pipe.clone());
+        let info = on_thread(move || lifeboat_size_info(&pipe)).await.unwrap();
+        assert_eq!(info.max_size, 30);
+        assert_eq!(info.used, Some(4));
+        let n = on_thread(move || resize_lifeboat(&p1, "pw", 20))
+            .await
+            .unwrap();
+        assert_eq!(n, 20);
+        let note = on_thread(move || remove_lifeboat(&p2, "pw", "DELETE"))
+            .await
+            .unwrap();
+        assert_eq!(note, "space note");
+        let err = on_thread(move || remove_lifeboat(&p3, "pw", "nope"))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("DELETE"));
         h.await.unwrap();
     }
 

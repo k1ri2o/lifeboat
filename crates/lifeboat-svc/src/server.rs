@@ -24,6 +24,49 @@ use tokio::sync::watch;
 pub type PrepareFn =
     Box<dyn Fn(u32, PrepareMode) -> Result<(String, String), String> + Send + Sync>;
 
+type VerifyFn =
+    Box<dyn Fn(&State, &Config, &RateLimiter, &str) -> Result<(), Response> + Send + Sync>;
+type GrowInfoFn = Box<dyn Fn(&str) -> Result<lifeboat_disk::GrowInfo, String> + Send + Sync>;
+type GrowFn = Box<dyn Fn(&str, u64) -> Result<u64, String> + Send + Sync>;
+type RemoveFn = Box<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+
+/// The disk and password steps behind resize and delete (#54, #55). The real ones touch
+/// Windows disks, so tests replace them.
+pub struct DiskOps {
+    /// Checks the password (or recovery key) for a destructive request. `Ok` when it fits.
+    pub verify: VerifyFn,
+    pub grow_info: GrowInfoFn,
+    /// Grow to this many bytes; returns the new size.
+    pub grow: GrowFn,
+    /// Delete the partition; returns a note for the user (may be empty).
+    pub remove: RemoveFn,
+}
+
+impl DiskOps {
+    #[allow(clippy::result_large_err)]
+    fn real() -> Self {
+        DiskOps {
+            verify: Box::new(|st, cfg, limiter, pw| {
+                let checked = with_volume(st, cfg, |c, _| match password_gate(c, limiter, pw) {
+                    Ok(()) => Response::Done,
+                    Err(r) => refused(r),
+                });
+                match checked {
+                    Response::Done => Ok(()),
+                    other => Err(other),
+                }
+            }),
+            grow_info: Box::new(|g| lifeboat_disk::grow_info(g).map_err(|e| e.to_string())),
+            grow: Box::new(|g, n| lifeboat_disk::grow_lifeboat(g, n).map_err(|e| e.to_string())),
+            remove: Box::new(|g| {
+                lifeboat_disk::remove_lifeboat(g)
+                    .map(|o| o.note)
+                    .map_err(|e| e.to_string())
+            }),
+        }
+    }
+}
+
 /// Everything the request handlers share.
 pub struct State {
     pub cfg: Mutex<Config>,
@@ -35,6 +78,8 @@ pub struct State {
     pub prepare: PrepareFn,
     /// Volume lease, result caches and repository lock.
     pub ctx: Arc<Ctx>,
+    /// Resize / delete steps (replaced in tests).
+    pub disk_ops: DiskOps,
 }
 
 impl State {
@@ -45,6 +90,7 @@ impl State {
             paths,
             cycle_lock: Mutex::new(()),
             ctx: Arc::new(Ctx::new()),
+            disk_ops: DiskOps::real(),
             prepare: Box::new(|disk, mode| {
                 prepare(disk, mode)
                     .map(|v| (v.volume_path, v.partition_guid))
@@ -1232,6 +1278,129 @@ fn dispatch(
             folders: folder_strings(&cfg),
         },
         Request::SetFolders { folders, password } => set_folders(st, limiter, folders, password),
+        // --- Resize and delete the Lifeboat partition (#54, #55) ---
+        Request::LifeboatSizeInfo => lifeboat_size_info(st, &cfg),
+        Request::ResizeLifeboat { password, new_size } => {
+            // Admin first, like PrepareDisk: no password guess is spent for a non-admin.
+            if let Err(r) = require_admin(is_admin()) {
+                return refused(r);
+            }
+            resize_lifeboat(st, limiter, &cfg, &password, new_size)
+        }
+        Request::RemoveLifeboat { password, confirm } => {
+            if let Err(r) = require_admin(is_admin()) {
+                return refused(r);
+            }
+            remove_lifeboat(st, limiter, &cfg, &password, &confirm)
+        }
+    }
+}
+
+/// The word the user must type to delete Lifeboat.
+pub const REMOVE_CONFIRM_WORD: &str = "DELETE";
+
+#[allow(clippy::result_large_err)]
+fn lifeboat_guid(cfg: &Config) -> Result<&str, Response> {
+    if cfg.partition_guid.trim().is_empty() {
+        return Err(err(
+            "Lifeboat does not use its own partition here, so there is nothing to resize or delete",
+        ));
+    }
+    Ok(&cfg.partition_guid)
+}
+
+/// Read-only: size, fill level and how far Lifeboat can grow.
+fn lifeboat_size_info(st: &State, cfg: &Config) -> Response {
+    let guid = match lifeboat_guid(cfg) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    match (st.disk_ops.grow_info)(guid) {
+        Ok(i) => Response::ResizeInfo {
+            total: i.current_size,
+            used: i.used,
+            max_size: i.max_size,
+            can_grow: i.can_grow,
+            reason: i.reason,
+        },
+        Err(e) => err(e),
+    }
+}
+
+/// Grow the Lifeboat partition. Password-gated, refused while frozen. Holds the repository
+/// lock exclusively and drops the volume lease first, so no backup or read is running.
+fn resize_lifeboat(
+    st: &State,
+    limiter: &RateLimiter,
+    cfg: &Config,
+    password: &str,
+    new_size: u64,
+) -> Response {
+    if is_frozen(st) {
+        return err("backups are frozen; unfreeze first");
+    }
+    let guid = match lifeboat_guid(cfg) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    if let Err(r) = (st.disk_ops.verify)(st, cfg, limiter, password) {
+        return r;
+    }
+    let _w = st.ctx.write();
+    // A freeze may have started while we waited for the lock.
+    if is_frozen(st) {
+        return err("backups are frozen; unfreeze first");
+    }
+    st.ctx.lease.release_now();
+    let result = (st.disk_ops.grow)(guid, new_size);
+    st.ctx.caches.invalidate_all();
+    match result {
+        Ok(n) => Response::Resized { new_size: n },
+        Err(e) => err(e),
+    }
+}
+
+/// Delete the Lifeboat partition and forget the setup. The confirm word is checked before
+/// anything else, so a stray request never reaches the disk.
+fn remove_lifeboat(
+    st: &State,
+    limiter: &RateLimiter,
+    cfg: &Config,
+    password: &str,
+    confirm: &str,
+) -> Response {
+    if is_frozen(st) {
+        return err("backups are frozen; unfreeze first");
+    }
+    if confirm != REMOVE_CONFIRM_WORD {
+        return err(format!(
+            "type {REMOVE_CONFIRM_WORD} to confirm deleting Lifeboat"
+        ));
+    }
+    let guid = match lifeboat_guid(cfg) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    if let Err(r) = (st.disk_ops.verify)(st, cfg, limiter, password) {
+        return r;
+    }
+    let _w = st.ctx.write();
+    // A freeze may have started while we waited for the lock.
+    if is_frozen(st) {
+        return err("backups are frozen; unfreeze first");
+    }
+    st.ctx.lease.release_now();
+    let note = match (st.disk_ops.remove)(guid) {
+        Ok(n) => n,
+        Err(e) => return err(e),
+    };
+    st.ctx.caches.invalidate_all();
+    // Back to first-run setup: no repository, no password, no folders, no queued deletes.
+    match st.update(|c| *c = Config::default()) {
+        Ok(()) => Response::Removed { note },
+        Err(e) => err(format!(
+            "Lifeboat was deleted but the setup could not be reset: {e}"
+        )),
     }
 }
 
@@ -1324,6 +1493,7 @@ pub async fn serve_default(st: Arc<State>, stop: watch::Receiver<bool>) -> io::R
 }
 
 #[cfg(test)]
+#[allow(clippy::result_large_err)]
 mod tests {
 
     #[test]
@@ -2068,5 +2238,248 @@ mod tests {
         assert_eq!(resp, Response::Pong);
         tx.send(true).unwrap();
         h.await.unwrap().unwrap();
+    }
+
+    // --- Resize and delete the Lifeboat partition (#54, #55) ---
+
+    use std::sync::atomic::AtomicU32;
+
+    /// A state with a Lifeboat guid, a verify that accepts the password "good", and disk
+    /// steps that only count calls.
+    fn disk_state(dir: &std::path::Path, calls: Arc<AtomicU32>) -> State {
+        let mut cfg = with_repo();
+        cfg.partition_guid = "{guid-1}".into();
+        cfg.folders = vec![PathBuf::from("C:/Docs")];
+        let mut st = state_with(cfg, dir);
+        st.disk_ops.verify = Box::new(|_, _, _, pw| {
+            if pw == "good" {
+                Ok(())
+            } else {
+                Err(Response::Error {
+                    message: "password wrong".into(),
+                })
+            }
+        });
+        let c1 = calls.clone();
+        st.disk_ops.grow = Box::new(move |_, n| {
+            c1.fetch_add(1, Ordering::SeqCst);
+            Ok(n)
+        });
+        let c2 = calls.clone();
+        st.disk_ops.remove = Box::new(move |_| {
+            c2.fetch_add(1, Ordering::SeqCst);
+            Ok(String::new())
+        });
+        st.disk_ops.grow_info = Box::new(|_| {
+            Ok(lifeboat_disk::GrowInfo {
+                current_size: 10,
+                max_size: 30,
+                can_grow: true,
+                reason: String::new(),
+                used: Some(4),
+            })
+        });
+        st
+    }
+
+    fn freeze(st: &State) {
+        let mut f = FreezeState::default();
+        f.freeze(vec!["mass rename".into()]);
+        f.save(&st.paths.freeze).unwrap();
+    }
+
+    #[test]
+    fn remove_needs_the_exact_confirm_word_before_touching_the_disk() {
+        let d = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let st = disk_state(d.path(), calls.clone());
+        for word in ["", "delete", "DELETE ", "Delete", "yes"] {
+            let line =
+                format!(r#"{{"cmd":"RemoveLifeboat","password":"good","confirm":"{word}"}}"#);
+            assert!(
+                message(call(&line, &st, true)).contains("type DELETE"),
+                "{word:?}"
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!st.snapshot_cfg().partition_guid.is_empty());
+    }
+
+    #[test]
+    fn resize_and_remove_are_refused_while_frozen() {
+        let d = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let st = disk_state(d.path(), calls.clone());
+        freeze(&st);
+        for line in [
+            r#"{"cmd":"ResizeLifeboat","password":"good","new_size":99}"#,
+            r#"{"cmd":"RemoveLifeboat","password":"good","confirm":"DELETE"}"#,
+        ] {
+            assert_eq!(
+                message(call(line, &st, true)),
+                "backups are frozen; unfreeze first"
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn wrong_password_never_reaches_the_disk() {
+        let d = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let st = disk_state(d.path(), calls.clone());
+        for line in [
+            r#"{"cmd":"ResizeLifeboat","password":"bad","new_size":99}"#,
+            r#"{"cmd":"RemoveLifeboat","password":"bad","confirm":"DELETE"}"#,
+        ] {
+            assert_eq!(message(call(line, &st, true)), "password wrong");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!st.snapshot_cfg().partition_guid.is_empty());
+    }
+
+    #[test]
+    fn no_partition_refuses_before_any_password_work() {
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg = with_repo();
+        cfg.partition_guid = String::new();
+        let st = state_with(cfg, d.path());
+        // No partition: refused before any password work.
+        let m = message(call(
+            r#"{"cmd":"RemoveLifeboat","password":"","confirm":"DELETE"}"#,
+            &st,
+            true,
+        ));
+        assert!(m.contains("nothing to resize or delete"), "{m}");
+    }
+
+    #[test]
+    fn resize_grows_and_reports_the_new_size() {
+        let d = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let st = disk_state(d.path(), calls.clone());
+        let r = call(
+            r#"{"cmd":"ResizeLifeboat","password":"good","new_size":2048}"#,
+            &st,
+            true,
+        );
+        assert_eq!(r, Response::Resized { new_size: 2048 });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn resize_error_from_the_disk_is_passed_on() {
+        let d = tempfile::tempdir().unwrap();
+        let mut st = disk_state(d.path(), Arc::new(AtomicU32::new(0)));
+        st.disk_ops.grow = Box::new(|_, _| {
+            Err("Lifeboat can't grow here because the free space is in front of it".into())
+        });
+        let m = message(call(
+            r#"{"cmd":"ResizeLifeboat","password":"good","new_size":2048}"#,
+            &st,
+            true,
+        ));
+        assert!(m.starts_with("Lifeboat can't grow here because"), "{m}");
+    }
+
+    #[test]
+    fn size_info_reports_used_total_and_max() {
+        let d = tempfile::tempdir().unwrap();
+        let st = disk_state(d.path(), Arc::new(AtomicU32::new(0)));
+        assert_eq!(
+            call(r#"{"cmd":"LifeboatSizeInfo"}"#, &st, true),
+            Response::ResizeInfo {
+                total: 10,
+                used: Some(4),
+                max_size: 30,
+                can_grow: true,
+                reason: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn remove_deletes_and_resets_the_setup() {
+        let d = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let st = disk_state(d.path(), calls.clone());
+        let r = call(
+            r#"{"cmd":"RemoveLifeboat","password":"good","confirm":"DELETE"}"#,
+            &st,
+            true,
+        );
+        assert_eq!(
+            r,
+            Response::Removed {
+                note: String::new()
+            }
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(st.snapshot_cfg(), Config::default());
+        // Saved too: a restart comes back to first-run setup.
+        let saved = Store::at(d.path().join("config.json")).load().unwrap();
+        assert_eq!(saved, Config::default());
+    }
+
+    #[test]
+    fn failed_delete_keeps_the_setup() {
+        let d = tempfile::tempdir().unwrap();
+        let mut st = disk_state(d.path(), Arc::new(AtomicU32::new(0)));
+        st.disk_ops.remove = Box::new(|_| Err("marker file does not match".into()));
+        let m = message(call(
+            r#"{"cmd":"RemoveLifeboat","password":"good","confirm":"DELETE"}"#,
+            &st,
+            true,
+        ));
+        assert!(m.contains("marker"), "{m}");
+        assert!(!st.snapshot_cfg().partition_guid.is_empty());
+    }
+
+    #[test]
+    fn resize_and_remove_need_an_admin_before_any_password_guess() {
+        let d = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let st = disk_state(d.path(), calls.clone());
+        let limiter = RateLimiter::default();
+        for line in [
+            r#"{"cmd":"ResizeLifeboat","password":"bad","new_size":99}"#,
+            r#"{"cmd":"RemoveLifeboat","password":"bad","confirm":"DELETE"}"#,
+            r#"{"cmd":"ResizeLifeboat","password":"good","new_size":99}"#,
+            r#"{"cmd":"RemoveLifeboat","password":"good","confirm":"DELETE"}"#,
+        ] {
+            let m = message(handle_line(line, &st, &limiter, &|| false));
+            // The refusal is the admin one, never "password wrong".
+            assert_ne!(m, "password wrong", "{line}");
+            assert_eq!(m, Refusal::NeedsAdmin.to_string(), "{line}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!st.snapshot_cfg().partition_guid.is_empty());
+    }
+
+    #[test]
+    fn a_freeze_that_starts_while_waiting_for_the_lock_stops_resize_and_remove() {
+        for line in [
+            r#"{"cmd":"ResizeLifeboat","password":"good","new_size":99}"#,
+            r#"{"cmd":"RemoveLifeboat","password":"good","confirm":"DELETE"}"#,
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            let calls = Arc::new(AtomicU32::new(0));
+            let mut st = disk_state(d.path(), calls.clone());
+            // The freeze lands after the first check, during the password step.
+            let freeze_path = st.paths.freeze.clone();
+            st.disk_ops.verify = Box::new(move |_, _, _, _| {
+                let mut f = FreezeState::default();
+                f.freeze(vec!["mass rename".into()]);
+                f.save(&freeze_path).unwrap();
+                Ok(())
+            });
+            assert_eq!(
+                message(call(line, &st, true)),
+                "backups are frozen; unfreeze first",
+                "{line}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "{line}");
+            assert!(!st.snapshot_cfg().partition_guid.is_empty());
+        }
     }
 }

@@ -104,6 +104,21 @@ pub enum Request {
         #[serde(default)]
         password: Option<String>,
     },
+
+    // --- Resize and delete the Lifeboat partition (#54, #55) ---
+    /// Read-only: how big Lifeboat is, how full, and how far it can grow.
+    LifeboatSizeInfo,
+    /// Grow the Lifeboat partition to `new_size` bytes. Needs the password; refused while frozen.
+    ResizeLifeboat {
+        password: String,
+        new_size: u64,
+    },
+    /// Delete the Lifeboat partition and all backups on it, forever. `confirm` must be the
+    /// word `DELETE`. Needs the password or recovery key; refused while frozen.
+    RemoveLifeboat {
+        password: String,
+        confirm: String,
+    },
 }
 
 /// A snapshot as shown to the UI.
@@ -229,6 +244,30 @@ pub enum Response {
         volume_path: String,
         /// Unique partition GUID; the UI/service saves it as `Config::partition_guid`.
         partition_guid: String,
+    },
+    /// Answer to `LifeboatSizeInfo` (#54).
+    ResizeInfo {
+        /// Current partition size in bytes.
+        total: u64,
+        /// Approximate bytes in use, when known.
+        #[serde(default)]
+        used: Option<u64>,
+        /// Largest size Lifeboat can be given.
+        max_size: u64,
+        can_grow: bool,
+        /// Plain-English reason when it can't grow.
+        #[serde(default)]
+        reason: String,
+    },
+    /// `ResizeLifeboat` finished; Lifeboat is now `new_size` bytes.
+    Resized {
+        new_size: u64,
+    },
+    /// `RemoveLifeboat` finished. `note` is empty, or says what could not be finished (for
+    /// example the freed space could not be given back to the drive in front).
+    Removed {
+        #[serde(default)]
+        note: String,
     },
     Error {
         message: String,
@@ -379,9 +418,34 @@ mod tests {
                 folders: vec!["C:/Docs".into()],
                 password: Some("p".into()),
             },
+            Request::LifeboatSizeInfo,
+            Request::ResizeLifeboat {
+                password: "p".into(),
+                new_size: 5 << 30,
+            },
+            Request::RemoveLifeboat {
+                password: "p".into(),
+                confirm: "DELETE".into(),
+            },
         ] {
             let s = serde_json::to_string(&r).unwrap();
             assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), r);
+        }
+        for r in [
+            Response::ResizeInfo {
+                total: 10,
+                used: Some(4),
+                max_size: 20,
+                can_grow: true,
+                reason: String::new(),
+            },
+            Response::Resized { new_size: 20 },
+            Response::Removed {
+                note: "careful".into(),
+            },
+        ] {
+            let s = serde_json::to_string(&r).unwrap();
+            assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
         }
         let r = Response::RepoInitialized {
             recovery_key: "K".into(),

@@ -2,7 +2,7 @@ import "./style.css";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { desktopDir, join } from "@tauri-apps/api/path";
-import { api, toApiError, type DriveStats, type Disk, type FileEntry, type HomeState, type VaultItem, type Snapshot as Version } from "./api";
+import { api, toApiError, type DriveStats, type Disk, type FileEntry, type HomeState, type LifeboatSize, type VaultItem, type Snapshot as Version } from "./api";
 import {
   folderParts,
   isStale,
@@ -32,6 +32,12 @@ import {
   vaultRemoveConfirmText,
   waitingDeletesTitle,
   pendingFor,
+  usedPercent,
+  isNearlyFull,
+  growRangeGb,
+  parseGrowGb,
+  deleteWordOk,
+  DELETE_WORD,
 } from "./format";
 import { adminButton, button, errorBox, h, icon, setLabel, skeleton, spinner, type Child } from "./ui";
 import { fetchFresh, guard, invalidate, peek, sig, swr } from "./cache";
@@ -941,18 +947,179 @@ function drivesCard(): HTMLElement {
 }
 
 function renderSettings(body: HTMLElement, st: HomeState) {
+  const sizeBox = h("div", { class: "size-box", "aria-live": "polite" });
+  void loadSizeBox(sizeBox);
   body.append(
     pageTitle("Settings"),
     drivesCard(),
     h(
       "section",
       { class: "card rows" },
-      h("div", { class: "setting" }, icon("drive", 24), h("div", { class: "grow" }, h("h3", {}, "Backup drive"), h("p", { class: "muted" }, "Choose a different drive for your backups. Do this only if you were asked to.")), button("Set up a drive", { onclick: () => go("setup") })),
+      h("div", { class: "setting" }, icon("drive", 24), h("div", { class: "grow" }, h("h3", {}, "Backup drive"), h("p", { class: "muted" }, "Choose a different drive for your backups. Do this only if you were asked to."), sizeBox), button("Set up a drive", { onclick: () => go("setup") })),
       h("div", { class: "setting" }, icon("lock", 24), h("div", { class: "grow" }, h("h3", {}, "Your password and recovery key"), h("p", { class: "muted" }, "Keep them somewhere safe, not on this computer. Lifeboat cannot show them again."))),
       h("div", { class: "setting" }, icon("shield", 24), h("div", { class: "grow" }, h("h3", {}, "Extra protection"), h("p", { class: "muted" }, "Old backups are never changed. Deleting a backup needs your password and waits 7 days."))),
       h("div", { class: "setting" }, icon("info", 24), h("div", { class: "grow" }, h("h3", {}, "About"), h("p", { class: "muted" }, `Lifeboat version ${st.status.version}`))),
     ),
+    h(
+      "section",
+      { class: "card rows danger-zone" },
+      h(
+        "div",
+        { class: "setting" },
+        icon("trash", 24),
+        h("div", { class: "grow" }, h("h3", {}, "Danger zone"), h("p", { class: "muted" }, "Delete Lifeboat and everything in it: all backups and all vault items. This cannot be undone.")),
+        button("Delete Lifeboat", { cls: "danger", onclick: () => deleteLifeboatDialog() }),
+      ),
+    ),
   );
+}
+
+/** Used / total size of the Lifeboat partition, a warning when nearly full, and the "Make bigger" button. */
+async function loadSizeBox(box: HTMLElement) {
+  let info: LifeboatSize;
+  try {
+    info = await api.lifeboatSize();
+  } catch {
+    return; // No Lifeboat partition (or the service is away): show nothing here.
+  }
+  const pct = usedPercent(info.used, info.total);
+  const full = isNearlyFull(info.used, info.total);
+  const line =
+    info.used != null && pct != null
+      ? `${sizeLabel(info.used)} used of ${sizeLabel(info.total)} (${pct}% full)`
+      : `Lifeboat is ${sizeLabel(info.total)} big.`;
+  const bar =
+    pct != null
+      ? h("div", { class: "meter", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct), "aria-label": "Lifeboat space used" }, h("div", { class: full ? "meter-fill warn" : "meter-fill", style: `width:${pct}%` }))
+      : null;
+  const warn = full
+    ? h("div", { class: "notice warn" }, icon("info", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Lifeboat is almost full"), h("p", { class: "muted" }, "New backups may stop working soon. Make Lifeboat bigger, or remove old backups.")))
+    : null;
+  const canTry = info.can_grow && growRangeGb(info.total, info.max_size) != null;
+  const reason = canTry ? null : h("p", { class: "muted small" }, info.reason || "Lifeboat can't grow here because there is no free space right after it on this drive.");
+  box.replaceChildren(...([h("p", {}, line), bar, warn, reason, canTry ? button("Make bigger", { onclick: () => growDialog(info, box) }) : null].filter(Boolean) as HTMLElement[]));
+}
+
+/** "Make bigger": pick the new size, type the password, confirm. */
+function growDialog(info: LifeboatSize, box: HTMLElement) {
+  const range = growRangeGb(info.total, info.max_size)!;
+  const size = h("input", { type: "number", id: "grow-gb", min: String(range.min), max: String(range.max), step: "1", value: String(range.max) }) as HTMLInputElement;
+  const pw = h("input", { type: "password", id: "grow-pw", autocomplete: "off" }) as HTMLInputElement;
+  const msg = h("div", { "aria-live": "polite" });
+  const ok = button("Make bigger", { cls: "primary" });
+  const cancel = button("Cancel");
+  const overlay = h(
+    "div",
+    { class: "overlay" },
+    h(
+      "div",
+      { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "grow-title" },
+      h("h2", { id: "grow-title" }, "Make Lifeboat bigger"),
+      h("p", { class: "muted" }, `Lifeboat is ${sizeLabel(info.total)} now. It can grow to ${range.max} GB. It can only grow, never shrink. Your backups are not touched.`),
+      h("label", { for: "grow-gb" }, `New size in GB (${range.min} to ${range.max})`),
+      size,
+      h("label", { for: "grow-pw" }, "Your Lifeboat password"),
+      pw,
+      msg,
+      h("div", { class: "actions" }, ok, cancel),
+    ),
+  );
+  const close = () => overlay.remove();
+  const run = async () => {
+    const parsed = parseGrowGb(size.value, info.total, info.max_size);
+    if ("error" in parsed) {
+      msg.replaceChildren(errorBox(new Error(parsed.error)));
+      return;
+    }
+    ok.disabled = true;
+    msg.replaceChildren();
+    try {
+      await api.resizeLifeboat(pw.value, parsed.bytes);
+      close();
+      invalidate("home");
+      await loadSizeBox(box);
+    } catch (e) {
+      msg.replaceChildren(errorBox(e));
+      ok.disabled = false;
+    }
+  };
+  ok.addEventListener("click", () => void run());
+  cancel.addEventListener("click", close);
+  overlay.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Escape") close();
+    if ((e as KeyboardEvent).key === "Enter") void run();
+  });
+  document.body.append(overlay);
+  size.focus();
+}
+
+/** "Delete Lifeboat": strong warning, password, and the word DELETE typed in a box. */
+function deleteLifeboatDialog() {
+  const pw = h("input", { type: "password", id: "del-pw", autocomplete: "off" }) as HTMLInputElement;
+  const word = h("input", { type: "text", id: "del-word", autocomplete: "off", spellcheck: "false" }) as HTMLInputElement;
+  const msg = h("div", { "aria-live": "polite" });
+  const ok = button("Delete Lifeboat for good", { cls: "danger" });
+  ok.disabled = true;
+  const cancel = button("Cancel");
+  const overlay = h(
+    "div",
+    { class: "overlay" },
+    h(
+      "div",
+      { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "del-title" },
+      h("h2", { id: "del-title" }, "Delete Lifeboat?"),
+      h("div", { class: "notice bad" }, icon("alert", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "All backups and vault items will be gone forever."), h("p", { class: "muted" }, "There is no way to get them back, not even with your recovery key. Lifeboat will go back to the first set-up screen."))),
+      h("label", { for: "del-pw" }, "Your Lifeboat password or recovery key"),
+      pw,
+      h("label", { for: "del-word" }, `Type ${DELETE_WORD} to confirm`),
+      word,
+      msg,
+      h("div", { class: "actions" }, ok, cancel),
+    ),
+  );
+  const close = () => overlay.remove();
+  const sync = () => {
+    ok.disabled = !deleteWordOk(word.value);
+  };
+  word.addEventListener("input", sync);
+  let removed = false;
+  const leave = () => {
+    close();
+    go("setup");
+  };
+  const run = async () => {
+    if (removed) return leave();
+    if (!deleteWordOk(word.value)) return;
+    ok.disabled = true;
+    msg.replaceChildren();
+    try {
+      const note = await api.removeLifeboat(pw.value, word.value);
+      invalidate("home");
+      wiz.step = 1;
+      wiz.disk = undefined;
+      if (note) {
+        // Deleted, but something needs the user's attention: show it before leaving.
+        removed = true;
+        msg.replaceChildren(h("p", { class: "note" }, note));
+        ok.textContent = "Continue";
+        ok.disabled = false;
+        cancel.hidden = true;
+      } else {
+        leave();
+      }
+    } catch (e) {
+      msg.replaceChildren(errorBox(e));
+      sync();
+    }
+  };
+  ok.addEventListener("click", () => void run());
+  cancel.addEventListener("click", close);
+  overlay.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Escape") close();
+    if ((e as KeyboardEvent).key === "Enter") void run();
+  });
+  document.body.append(overlay);
+  pw.focus();
 }
 
 // ---------- First-run setup wizard ----------
