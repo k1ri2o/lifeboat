@@ -16,6 +16,9 @@ pub enum Op {
     GrowLifeboat,
     /// Delete the Lifeboat partition (any disk that holds it).
     RemoveLifeboat,
+    /// Shrink the drive in front of Lifeboat and build a bigger Lifeboat there (#62). Only on
+    /// a data disk that holds Lifeboat and another drive; never the Windows disk or disk 0.
+    MoveLifeboat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +69,17 @@ pub fn check(disk: &DiskInfo, op: Op, reuse: bool) -> Result<(), GuardError> {
             // only when the disk really holds a Lifeboat partition.
             if !disk.has_lifeboat_partition() {
                 return Err(GuardError::NoLifeboat(disk.number));
+            }
+        }
+        Op::MoveLifeboat => {
+            if protected || disk.number == 0 {
+                return Err(GuardError::BootOrSystemDisk(disk.number));
+            }
+            if !disk.has_lifeboat_partition() {
+                return Err(GuardError::NoLifeboat(disk.number));
+            }
+            if !disk.is_shared() {
+                return Err(GuardError::NotInternalDisk(disk.number));
             }
         }
         Op::SetOffline | Op::SetOnline => {
@@ -220,5 +234,46 @@ mod tests {
         let d = disk(false, false, vec![part(BASIC_DATA_TYPE_GUID)]);
         assert_eq!(check(&d, Op::SetOffline, false), Ok(()));
         assert_eq!(check(&d, Op::SetOnline, false), Ok(()));
+    }
+
+    #[test]
+    fn move_never_touches_the_windows_disk_or_disk_zero() {
+        let parts = vec![user_part(), part(BASIC_DATA_TYPE_GUID)];
+        assert_eq!(
+            check(&disk(false, false, parts.clone()), Op::MoveLifeboat, false),
+            Ok(())
+        );
+        for d in [
+            disk(true, false, parts.clone()),
+            disk(false, true, parts.clone()),
+        ] {
+            assert_eq!(
+                check(&d, Op::MoveLifeboat, false),
+                Err(GuardError::BootOrSystemDisk(3))
+            );
+        }
+        let mut zero = disk(false, false, parts.clone());
+        zero.number = 0;
+        assert_eq!(
+            check(&zero, Op::MoveLifeboat, false),
+            Err(GuardError::BootOrSystemDisk(0))
+        );
+        // No Lifeboat, or nothing in front of it to take space from.
+        assert_eq!(
+            check(
+                &disk(false, false, vec![user_part()]),
+                Op::MoveLifeboat,
+                false
+            ),
+            Err(GuardError::NoLifeboat(3))
+        );
+        assert_eq!(
+            check(
+                &disk(false, false, vec![part(BASIC_DATA_TYPE_GUID)]),
+                Op::MoveLifeboat,
+                false
+            ),
+            Err(GuardError::NotInternalDisk(3))
+        );
     }
 }

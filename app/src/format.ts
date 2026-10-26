@@ -146,10 +146,14 @@ export function usageLine(used: number | null | undefined, free: number | null |
   return `${sizeLabel(used)} used, ${sizeLabel(free)} free`;
 }
 
-/** A plain-English name for a drive's connection type. */
+/**
+ * A plain-English name for a drive's connection type, as Windows reports it.
+ * It never guesses "inside this computer": some USB boxes report SATA.
+ */
 export function busLabel(bus: string): string {
   if (/usb/i.test(bus)) return "USB drive";
-  if (/nvme|sata|ata|raid|scsi|sas/i.test(bus)) return "Inside this computer";
+  if (/nvme/i.test(bus)) return "NVMe drive";
+  if (/sata|^ata$/i.test(bus)) return "SATA drive";
   return "Drive";
 }
 
@@ -317,6 +321,19 @@ export function parseGrowGb(text: string, total: number, max: number): { bytes: 
   if (gb < range.min) return { error: `Pick at least ${range.min} GB. Lifeboat can only grow, not shrink.` };
   if (gb > range.max) return { error: `Pick at most ${range.max} GB. That is all the free space there is.` };
   return { bytes: Math.round(gb * GIB) };
+}
+
+/** How "Make bigger" can work for a given Lifeboat size report (#54, #62). */
+export type GrowOption = { mode: "grow" | "move"; max: number } | { mode: "none"; reason: string };
+
+export const MOVE_GROW_TEXT =
+  "Lifeboat will make a bigger copy of itself in space taken from the drive in front of it, check the copy, then remove the old one. Your backups stay safe the whole time. This can take a while.";
+
+/** Grow in place when there is free space right behind Lifeboat, else by moving, else say why not. */
+export function growOption(info: { total: number; max_size: number; can_grow: boolean; can_move?: boolean; move_max?: number; reason?: string }): GrowOption {
+  if (info.can_grow && growRangeGb(info.total, info.max_size)) return { mode: "grow", max: info.max_size };
+  if (info.can_move && growRangeGb(info.total, info.move_max ?? 0)) return { mode: "move", max: info.move_max ?? 0 };
+  return { mode: "none", reason: info.reason || "The drive in front of Lifeboat has no room left to give." };
 }
 
 /** The word that must be typed to delete Lifeboat. */

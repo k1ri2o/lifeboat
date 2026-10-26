@@ -26,7 +26,7 @@ export async function installMock(mode: string): Promise<void> {
     { path: "C:\\Users\\Dad\\Documents\\Will.pdf", dir: false, size: 210 * 1024, added: iso(2000), snapshot: "v3" },
   ];
   const G = 1024 ** 3;
-  // ?size=full shows the 85% warning, ?size=nogrow shows the "cannot grow" reason.
+  // ?size=full shows the 85% warning, ?size=nogrow offers the move-and-grow route, ?size=nospace shows why nothing is possible.
   const sizeMode = new URLSearchParams(location.search).get("size");
   let lbTotal = 100 * G;
   const lbUsed = () => (sizeMode === "full" ? 92 * G : 31 * G);
@@ -126,8 +126,15 @@ export async function installMock(mode: string): Promise<void> {
         return String(a.target);
       case "lifeboat_size_info":
         return sizeMode === "nogrow"
-          ? { total: lbTotal, used: lbUsed(), max_size: lbTotal, can_grow: false, reason: "Lifeboat can't grow here because the free space on this drive is in front of it, not behind it." }
-          : { total: lbTotal, used: lbUsed(), max_size: 300 * G, can_grow: true, reason: "" };
+          ? { total: lbTotal, used: lbUsed(), max_size: lbTotal, can_grow: false, can_move: true, move_max: lbTotal + 200 * G, reason: "" }
+          : sizeMode === "nospace"
+            ? { total: lbTotal, used: lbUsed(), max_size: lbTotal, can_grow: false, can_move: false, move_max: lbTotal, reason: "D: has no room left to give to Lifeboat." }
+            : { total: lbTotal, used: lbUsed(), max_size: 300 * G, can_grow: true, can_move: false, move_max: 300 * G, reason: "" };
+      case "move_grow_lifeboat":
+        if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
+        await wait(1500);
+        lbTotal = Number(a.newSize);
+        return "";
       case "resize_lifeboat":
         if (a.password !== "password") throw { kind: "service", message: "That password is not right. Please try again." };
         await wait(800);

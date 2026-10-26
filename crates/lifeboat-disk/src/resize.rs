@@ -1,12 +1,14 @@
 //! Grow and delete the Lifeboat partition.
 //!
-//! Layout decision (grow): Windows can only grow a partition into free space directly AFTER it.
+//! Growing in place: Windows can only grow a partition into free space directly AFTER it.
 //! Setup shrinks a drive and creates Lifeboat in the freed space behind it, so Lifeboat sits at
 //! the end of the old extent. Free space after Lifeboat exists only when the disk had
-//! unallocated room there already (an external disk that was not fully used, a gap before a
-//! recovery partition). Space freed later by shrinking a drive lands BEFORE Lifeboat and cannot
-//! be used in place; moving or recreating a partition that holds the backups is far too risky,
-//! so then growing is refused with a plain explanation.
+//! unallocated room there already.
+//!
+//! Space freed later by shrinking a drive lands BEFORE Lifeboat and cannot be used in place.
+//! For that case `move_grow` builds a bigger partition in the freed space, copies and checks
+//! the repository, switches over and only then removes the old partition (#62). `grow_info`
+//! reports both routes (`can_grow` for in place, `can_move`/`move_max` for the move).
 //!
 //! Everything that decides what to do is a pure function (planner, script text); the execute
 //! functions at the bottom run the scripts and are never exercised by unit tests.
@@ -19,19 +21,19 @@ use crate::{Error, Result};
 use lifeboat_core::disk::{is_basic_data_type, DiskInfo, PartitionInfo, BASIC_DATA_TYPE_GUID};
 use serde::Deserialize;
 
-const MIB: u64 = 1024 * 1024;
+pub(crate) const MIB: u64 = 1024 * 1024;
 /// Growing by less than this is not worth a resize.
-const MIN_GROW: u64 = 64 * MIB;
+pub(crate) const MIN_GROW: u64 = 64 * MIB;
 /// Largest gap between the host volume and Lifeboat that still counts as "directly before".
-const HOST_GAP: u64 = 8 * MIB;
+pub(crate) const HOST_GAP: u64 = 8 * MIB;
 /// Free space in front of Lifeboat worth mentioning in the refusal text.
 const FRONT_HINT: u64 = 1024 * MIB;
 
-fn gib(b: u64) -> String {
+pub(crate) fn gib(b: u64) -> String {
     format!("{:.1} GiB", b as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
-fn lifeboat_of<'a>(disk: &'a DiskInfo, guid: &str) -> Result<&'a PartitionInfo> {
+pub(crate) fn lifeboat_of<'a>(disk: &'a DiskInfo, guid: &str) -> Result<&'a PartitionInfo> {
     disk.partitions
         .iter()
         .find(|p| p.has_guid(guid))
@@ -47,8 +49,13 @@ pub struct GrowInfo {
     pub can_grow: bool,
     /// Plain-English reason when `can_grow` is false; empty otherwise.
     pub reason: String,
-    /// Approximate space in use (Windows' minimum supported size), when Windows could tell.
+    /// The smallest size Windows could shrink this partition to (its data plus a safety
+    /// margin). Not the space in use: the service measures that from the free space.
     pub used: Option<u64>,
+    /// Growing is possible by moving: the drive in front of Lifeboat can give up space.
+    pub can_move: bool,
+    /// Largest total size reachable by moving (at least `current_size`).
+    pub move_max: u64,
 }
 
 impl GrowInfo {
@@ -84,11 +91,11 @@ impl GrowInfo {
             let free_before = lb.offset.saturating_sub(before);
             if free_before >= FRONT_HINT {
                 format!(
-                    "Lifeboat can't grow here because the free space ({}) is in front of it, and Windows can only grow a partition into space behind it. Moving a partition that holds your backups is too risky, so Lifeboat stays the size it is.",
+                    "The free space ({}) is in front of Lifeboat, and Windows can only grow a partition into space behind it.",
                     gib(free_before)
                 )
             } else {
-                "Lifeboat can't grow here because there is no free space directly behind it on its disk. Free some space behind it first, or use a bigger drive.".to_string()
+                "There is no free space on this disk to grow into.".to_string()
             }
         };
         Ok(Self {
@@ -97,6 +104,8 @@ impl GrowInfo {
             can_grow,
             reason,
             used: None,
+            can_move: false,
+            move_max: lb.size,
         })
     }
 
@@ -125,7 +134,7 @@ impl GrowInfo {
 }
 
 /// PowerShell that finds the partition with unique GUID `guid` into `$p` (throws when absent).
-fn find_into_p(guid: &str) -> String {
+pub(crate) fn find_into_p(guid: &str) -> String {
     format!(
         "$p = Get-Partition | Where-Object {{ $_.Guid -eq {} }} | Select-Object -First 1; \
          if (-not $p) {{ throw 'partition not found' }}; ",
@@ -177,7 +186,7 @@ pub fn grow_script(guid: &str, new_size: u64) -> String {
     )
 }
 
-fn disk_with(guid: &str) -> Result<DiskInfo> {
+pub(crate) fn disk_with(guid: &str) -> Result<DiskInfo> {
     list_disks()?
         .into_iter()
         .find(|d| d.partitions.iter().any(|p| p.has_guid(guid)))
@@ -194,6 +203,19 @@ pub fn grow_info(guid: &str) -> Result<GrowInfo> {
         .map(|(_, max)| max);
     let mut info = GrowInfo::build(&disk, guid, supported)?;
     info.used = out.as_deref().and_then(parse_used);
+    if !info.can_grow {
+        match crate::move_grow::plan(guid) {
+            Ok(p) if p.room >= MIN_GROW => {
+                info.can_move = true;
+                info.move_max = p.max_target();
+                info.reason.clear();
+            }
+            Ok(p) => {
+                info.reason = format!("{}: has no room left to give to Lifeboat.", p.host_letter)
+            }
+            Err(_) => {}
+        }
+    }
     Ok(info)
 }
 
@@ -233,7 +255,7 @@ pub struct RemovePlan {
 }
 
 /// USB and other removable buses (SD cards, 1394) count as external.
-fn is_removable_bus(bus: &str) -> bool {
+pub(crate) fn is_removable_bus(bus: &str) -> bool {
     let b = bus.to_ascii_lowercase();
     b.contains("usb") || b.contains("sd") || b.contains("mmc") || b.contains("1394")
 }
@@ -422,12 +444,8 @@ mod tests {
         );
         let i = GrowInfo::build(&d, LB, None).unwrap();
         assert!(!i.can_grow);
-        assert!(
-            i.reason.starts_with("Lifeboat can't grow here because"),
-            "{}",
-            i.reason
-        );
-        assert!(i.reason.contains("in front of it"), "{}", i.reason);
+        assert!(i.reason.contains("is in front of Lifeboat"), "{}", i.reason);
+        assert!(!i.can_move);
         assert!(i.check_size(250 * G).is_err());
     }
 
@@ -437,7 +455,7 @@ mod tests {
         let i = GrowInfo::build(&d, LB, None).unwrap();
         assert!(!i.can_grow);
         assert!(
-            i.reason.contains("no free space directly behind"),
+            i.reason.contains("no free space on this disk"),
             "{}",
             i.reason
         );

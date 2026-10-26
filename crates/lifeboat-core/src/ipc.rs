@@ -113,6 +113,13 @@ pub enum Request {
         password: String,
         new_size: u64,
     },
+    /// Grow Lifeboat to `new_size` when the free space is in front of it: build a bigger copy
+    /// in space taken from the drive in front, check it, switch, remove the old one (#62).
+    /// Needs the password; refused while frozen.
+    MoveGrowLifeboat {
+        password: String,
+        new_size: u64,
+    },
     /// Delete the Lifeboat partition and all backups on it, forever. `confirm` must be the
     /// word `DELETE`. Needs the password or recovery key; refused while frozen.
     RemoveLifeboat {
@@ -258,6 +265,19 @@ pub enum Response {
         /// Plain-English reason when it can't grow.
         #[serde(default)]
         reason: String,
+        /// Growing by moving is possible (#62). Old services omit it.
+        #[serde(default)]
+        can_move: bool,
+        /// Largest total size reachable by moving.
+        #[serde(default)]
+        move_max: u64,
+    },
+    /// `MoveGrowLifeboat` finished; Lifeboat is now `new_size` bytes. `note` says what could
+    /// not be finished (the backups are safe either way).
+    Moved {
+        new_size: u64,
+        #[serde(default)]
+        note: String,
     },
     /// `ResizeLifeboat` finished; Lifeboat is now `new_size` bytes.
     Resized {
@@ -423,6 +443,10 @@ mod tests {
                 password: "p".into(),
                 new_size: 5 << 30,
             },
+            Request::MoveGrowLifeboat {
+                password: "p".into(),
+                new_size: 50 << 30,
+            },
             Request::RemoveLifeboat {
                 password: "p".into(),
                 confirm: "DELETE".into(),
@@ -438,6 +462,12 @@ mod tests {
                 max_size: 20,
                 can_grow: true,
                 reason: String::new(),
+                can_move: true,
+                move_max: 40,
+            },
+            Response::Moved {
+                new_size: 30,
+                note: String::new(),
             },
             Response::Resized { new_size: 20 },
             Response::Removed {
@@ -461,6 +491,20 @@ mod tests {
             serde_json::to_string(&Response::Done).unwrap(),
             r#"{"reply":"Done"}"#
         );
+    }
+
+    #[test]
+    fn old_resize_info_still_parses() {
+        let j = r#"{"reply":"ResizeInfo","total":1,"max_size":2,"can_grow":false}"#;
+        match serde_json::from_str::<Response>(j) {
+            Ok(Response::ResizeInfo {
+                can_move, move_max, ..
+            }) => {
+                assert!(!can_move);
+                assert_eq!(move_max, 0);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

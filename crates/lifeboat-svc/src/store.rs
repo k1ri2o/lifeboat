@@ -5,7 +5,7 @@
 //! stay as a test override (see [`env_override`]).
 
 use crate::dpapi;
-use lifeboat_core::config::{CheckResult, Config, PendingDelete, PendingVaultRemove};
+use lifeboat_core::config::{CheckResult, Config, PendingDelete, PendingMove, PendingVaultRemove};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +29,8 @@ struct OnDisk {
     pending_deletes: Vec<PendingDelete>,
     #[serde(default)]
     pending_vault_removes: Vec<PendingVaultRemove>,
+    #[serde(default)]
+    pending_move: Option<PendingMove>,
 }
 
 pub fn to_hex(b: &[u8]) -> String {
@@ -109,6 +111,7 @@ impl Store {
             last_check: d.last_check,
             pending_deletes: d.pending_deletes,
             pending_vault_removes: d.pending_vault_removes,
+            pending_move: d.pending_move,
         })
     }
 
@@ -132,6 +135,7 @@ impl Store {
             last_check: cfg.last_check.clone(),
             pending_deletes: cfg.pending_deletes.clone(),
             pending_vault_removes: cfg.pending_vault_removes.clone(),
+            pending_move: cfg.pending_move.clone(),
         };
         let json = serde_json::to_vec_pretty(&d)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -218,6 +222,13 @@ mod tests {
                 snapshot: "v1".into(),
                 due: 10,
             }],
+            pending_move: Some(lifeboat_core::config::PendingMove {
+                stage: lifeboat_core::config::MoveStage::Switched,
+                old_guid: "{o}".into(),
+                new_guid: "{n}".into(),
+                host_guid: "{h}".into(),
+                target: 5,
+            }),
         };
         s.save(&c).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();

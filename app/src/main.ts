@@ -35,6 +35,8 @@ import {
   usedPercent,
   isNearlyFull,
   growRangeGb,
+  growOption,
+  MOVE_GROW_TEXT,
   parseGrowGb,
   deleteWordOk,
   DELETE_WORD,
@@ -995,14 +997,15 @@ async function loadSizeBox(box: HTMLElement) {
   const warn = full
     ? h("div", { class: "notice warn" }, icon("info", 22), h("div", { class: "notice-body" }, h("p", { class: "notice-title" }, "Lifeboat is almost full"), h("p", { class: "muted" }, "New backups may stop working soon. Make Lifeboat bigger, or remove old backups.")))
     : null;
-  const canTry = info.can_grow && growRangeGb(info.total, info.max_size) != null;
-  const reason = canTry ? null : h("p", { class: "muted small" }, info.reason || "Lifeboat can't grow here because there is no free space right after it on this drive.");
-  box.replaceChildren(...([h("p", {}, line), bar, warn, reason, canTry ? button("Make bigger", { onclick: () => growDialog(info, box) }) : null].filter(Boolean) as HTMLElement[]));
+  const opt = growOption(info);
+  const reason = opt.mode === "none" ? h("p", { class: "muted small" }, opt.reason) : null;
+  box.replaceChildren(...([h("p", {}, line), bar, warn, reason, opt.mode !== "none" ? button("Make bigger", { onclick: () => growDialog(info, box, opt.mode === "move") }) : null].filter(Boolean) as HTMLElement[]));
 }
 
 /** "Make bigger": pick the new size, type the password, confirm. */
-function growDialog(info: LifeboatSize, box: HTMLElement) {
-  const range = growRangeGb(info.total, info.max_size)!;
+function growDialog(info: LifeboatSize, box: HTMLElement, move = false) {
+  const top = move ? (info.move_max ?? info.total) : info.max_size;
+  const range = growRangeGb(info.total, top)!;
   const size = h("input", { type: "number", id: "grow-gb", min: String(range.min), max: String(range.max), step: "1", value: String(range.max) }) as HTMLInputElement;
   const pw = h("input", { type: "password", id: "grow-pw", autocomplete: "off" }) as HTMLInputElement;
   const msg = h("div", { "aria-live": "polite" });
@@ -1016,6 +1019,7 @@ function growDialog(info: LifeboatSize, box: HTMLElement) {
       { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "grow-title" },
       h("h2", { id: "grow-title" }, "Make Lifeboat bigger"),
       h("p", { class: "muted" }, `Lifeboat is ${sizeLabel(info.total)} now. It can grow to ${range.max} GB. It can only grow, never shrink. Your backups are not touched.`),
+      move ? h("p", { class: "muted" }, MOVE_GROW_TEXT) : null,
       h("label", { for: "grow-gb" }, `New size in GB (${range.min} to ${range.max})`),
       size,
       h("label", { for: "grow-pw" }, "Your Lifeboat password"),
@@ -1026,7 +1030,7 @@ function growDialog(info: LifeboatSize, box: HTMLElement) {
   );
   const close = () => overlay.remove();
   const run = async () => {
-    const parsed = parseGrowGb(size.value, info.total, info.max_size);
+    const parsed = parseGrowGb(size.value, info.total, top);
     if ("error" in parsed) {
       msg.replaceChildren(errorBox(new Error(parsed.error)));
       return;
@@ -1034,8 +1038,9 @@ function growDialog(info: LifeboatSize, box: HTMLElement) {
     ok.disabled = true;
     msg.replaceChildren();
     try {
-      await api.resizeLifeboat(pw.value, parsed.bytes);
+      const note = move ? await api.moveGrowLifeboat(pw.value, parsed.bytes) : (await api.resizeLifeboat(pw.value, parsed.bytes), "");
       close();
+      if (note) alert(note);
       invalidate("home");
       await loadSizeBox(box);
     } catch (e) {

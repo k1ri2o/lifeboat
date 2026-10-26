@@ -44,6 +44,10 @@ export interface LifeboatSize {
   can_grow: boolean;
   /** Why it cannot grow (plain words), when it cannot. */
   reason?: string;
+  /** Lifeboat could grow by moving into space taken from the drive in front of it. */
+  can_move?: boolean;
+  /** The most Lifeboat could be that way. */
+  move_max?: number;
 }
 export interface Partition {
   number: number;
@@ -152,6 +156,8 @@ export const api = {
     call<string>("vault_extract", { password, paths, target }),
   lifeboatSize: () => call<LifeboatSize>("lifeboat_size_info"),
   /** Grow the Lifeboat partition. Resolves to its new size in bytes. */
+  moveGrowLifeboat: (password: string, newSize: number) =>
+    call<string>("move_grow_lifeboat", { password, newSize }),
   resizeLifeboat: (password: string, newSize: number) =>
     call<number>("resize_lifeboat", { password, newSize }),
   /** Delete Lifeboat for good. `confirm` must be the word DELETE. */

@@ -8,6 +8,7 @@
 
 pub mod acl;
 pub mod guard;
+pub mod move_grow;
 pub mod ops;
 pub mod plan;
 mod ps;
@@ -18,6 +19,7 @@ pub use guard::{check, GuardError, Op};
 pub use lifeboat_core::disk::{
     DiskInfo, PartitionInfo, PrepareMode, BASIC_DATA_TYPE_GUID, MARKER_FILE,
 };
+pub use move_grow::MovePlan;
 pub use ops::{
     close_volume, find_lifeboat_volume, hide_lifeboat_volume, list_disks, open_volume,
     prepare_external, set_disk_offline, set_disk_online, PreparedVolume,

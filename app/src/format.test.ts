@@ -93,7 +93,10 @@ describe("drive usage", () => {
   });
   it("names bus types plainly", () => {
     expect(busLabel("USB")).toBe("USB drive");
-    expect(busLabel("NVMe")).toBe("Inside this computer");
+    expect(busLabel("NVMe")).toBe("NVMe drive");
+    expect(busLabel("SATA")).toBe("SATA drive");
+    expect(busLabel("ATA")).toBe("SATA drive");
+    expect(busLabel("RAID")).toBe("Drive");
     expect(busLabel("Weird")).toBe("Drive");
   });
 });
@@ -211,7 +214,7 @@ describe("vault removal helpers", () => {
   });
 });
 
-import { usedPercent, isNearlyFull, growRangeGb, parseGrowGb, deleteWordOk } from "./format";
+import { usedPercent, isNearlyFull, growRangeGb, parseGrowGb, deleteWordOk, growOption } from "./format";
 
 describe("Lifeboat size helpers", () => {
   const G = 1024 ** 3;
@@ -244,5 +247,25 @@ describe("Lifeboat size helpers", () => {
     expect(deleteWordOk("delete")).toBe(false);
     expect(deleteWordOk("DELETE ")).toBe(false);
     expect(deleteWordOk("")).toBe(false);
+  });
+});
+
+describe("growOption", () => {
+  const G = 1024 ** 3;
+  const base = { total: 10 * G, max_size: 10 * G, can_grow: false };
+  it("grows in place when there is room behind", () => {
+    expect(growOption({ ...base, max_size: 50 * G, can_grow: true })).toEqual({ mode: "grow", max: 50 * G });
+  });
+  it("moves when only the drive in front can give space", () => {
+    expect(growOption({ ...base, can_move: true, move_max: 200 * G })).toEqual({ mode: "move", max: 200 * G });
+  });
+  it("prefers growing in place over moving", () => {
+    expect(growOption({ ...base, max_size: 50 * G, can_grow: true, can_move: true, move_max: 200 * G }).mode).toBe("grow");
+  });
+  it("says why when nothing works", () => {
+    const o = growOption({ ...base, can_move: true, move_max: 10 * G, reason: "D: has no room left to give." });
+    expect(o).toEqual({ mode: "none", reason: "D: has no room left to give." });
+    const d = growOption(base);
+    expect(d.mode === "none" && d.reason).toMatch(/no room left to give/);
   });
 });
