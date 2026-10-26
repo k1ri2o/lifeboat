@@ -146,7 +146,10 @@ impl DiskOps {
             }),
             move_exists: Box::new(|g| {
                 lifeboat_disk::list_disks()
-                    .map(|ds| ds.iter().any(|d| d.partitions.iter().any(|p| p.has_guid(g))))
+                    .map(|ds| {
+                        ds.iter()
+                            .any(|d| d.partitions.iter().any(|p| p.has_guid(g)))
+                    })
                     .unwrap_or(true)
             }),
         }
@@ -1487,7 +1490,9 @@ fn move_grow_lifeboat(
         Err(r) => return r,
     };
     if cfg.pending_move.is_some() {
-        return err("A previous resize is still being settled. Restart the Lifeboat service and try again.");
+        return err(
+            "A previous resize is still being settled. Restart the Lifeboat service and try again.",
+        );
     }
     if let Err(r) = (st.disk_ops.verify)(st, cfg, limiter, password) {
         return r;
@@ -2845,7 +2850,8 @@ mod tests {
         st
     }
 
-    const MOVE_LINE: &str = r#"{"cmd":"MoveGrowLifeboat","password":"good","new_size":14000000000}"#;
+    const MOVE_LINE: &str =
+        r#"{"cmd":"MoveGrowLifeboat","password":"good","new_size":14000000000}"#;
 
     fn names(log: &Log) -> Vec<String> {
         log.lock().unwrap().clone()
@@ -2863,7 +2869,15 @@ mod tests {
         );
         assert_eq!(
             names(&log),
-            ["plan", "shrink", "create", "copy", "check", "remove_old", "grow"]
+            [
+                "plan",
+                "shrink",
+                "create",
+                "copy",
+                "check",
+                "remove_old",
+                "grow"
+            ]
         );
         let cfg = st.snapshot_cfg();
         assert_eq!(cfg.partition_guid, "{new}");
@@ -2893,11 +2907,17 @@ mod tests {
             } else {
                 "{new}"
             };
-            assert_eq!(last, &format!("rollback {{guid-1}} {{host}} {new}"), "{n:?}");
+            assert_eq!(
+                last,
+                &format!("rollback {{guid-1}} {{host}} {new}"),
+                "{n:?}"
+            );
             let cfg = st.snapshot_cfg();
             assert_eq!(cfg.partition_guid, "{guid-1}", "{step}");
             assert!(cfg.pending_move.is_none(), "{step}");
-            let saved = Store::at(d.path().join("config.json")).load().unwrap_or_default();
+            let saved = Store::at(d.path().join("config.json"))
+                .load()
+                .unwrap_or_default();
             assert!(saved.pending_move.is_none(), "{step}");
         }
     }

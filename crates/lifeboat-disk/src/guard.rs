@@ -260,7 +260,11 @@ mod tests {
         );
         // No Lifeboat, or nothing in front of it to take space from.
         assert_eq!(
-            check(&disk(false, false, vec![user_part()]), Op::MoveLifeboat, false),
+            check(
+                &disk(false, false, vec![user_part()]),
+                Op::MoveLifeboat,
+                false
+            ),
             Err(GuardError::NoLifeboat(3))
         );
         assert_eq!(

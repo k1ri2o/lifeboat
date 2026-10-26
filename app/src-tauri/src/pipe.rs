@@ -200,6 +200,10 @@ pub struct SizeInfo {
     pub max_size: u64,
     pub can_grow: bool,
     pub reason: String,
+    /// Lifeboat could grow by moving into space taken from the drive in front of it (#62).
+    pub can_move: bool,
+    /// The most Lifeboat could be that way.
+    pub move_max: u64,
 }
 
 pub fn lifeboat_size_info(pipe: &str) -> Result<SizeInfo, ApiError> {
@@ -210,12 +214,16 @@ pub fn lifeboat_size_info(pipe: &str) -> Result<SizeInfo, ApiError> {
             max_size,
             can_grow,
             reason,
+            can_move,
+            move_max,
         } => Ok(SizeInfo {
             total,
             used,
             max_size,
             can_grow,
             reason,
+            can_move,
+            move_max,
         }),
         r => Err(unexpected(r)),
     }
@@ -229,6 +237,19 @@ pub fn resize_lifeboat(pipe: &str, password: &str, new_size: u64) -> Result<u64,
     };
     match call(pipe, &req)? {
         Response::Resized { new_size } => Ok(new_size),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Make Lifeboat bigger by moving it into space taken from the drive in front (#62). Returns
+/// a note for the user (empty when everything went fine).
+pub fn move_grow_lifeboat(pipe: &str, password: &str, new_size: u64) -> Result<String, ApiError> {
+    let req = Request::MoveGrowLifeboat {
+        password: password.to_string(),
+        new_size,
+    };
+    match call(pipe, &req)? {
+        Response::Moved { note, .. } => Ok(note),
         r => Err(unexpected(r)),
     }
 }
@@ -542,15 +563,21 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn resize_and_remove_roundtrip() {
-        let (pipe, h) = fake_server("resizerm", 4, |req| match req {
+        let (pipe, h) = fake_server("resizerm", 5, |req| match req {
             Request::LifeboatSizeInfo => Response::ResizeInfo {
                 total: 10,
                 used: Some(4),
                 max_size: 30,
                 can_grow: true,
                 reason: String::new(),
+                can_move: true,
+                move_max: 50,
             },
             Request::ResizeLifeboat { new_size, .. } => Response::Resized { new_size },
+            Request::MoveGrowLifeboat { .. } => Response::Moved {
+                new_size: 20,
+                note: "moved".into(),
+            },
             Request::RemoveLifeboat { confirm, .. } if confirm == "DELETE" => Response::Removed {
                 note: "space note".into(),
             },
@@ -559,9 +586,15 @@ mod tests {
             },
             other => panic!("unexpected {other:?}"),
         });
-        let (p1, p2, p3) = (pipe.clone(), pipe.clone(), pipe.clone());
+        let (p1, p2, p3, p4) = (pipe.clone(), pipe.clone(), pipe.clone(), pipe.clone());
         let info = on_thread(move || lifeboat_size_info(&pipe)).await.unwrap();
         assert_eq!(info.max_size, 30);
+        assert!(info.can_move);
+        assert_eq!(info.move_max, 50);
+        let note = on_thread(move || move_grow_lifeboat(&p4, "pw", 20))
+            .await
+            .unwrap();
+        assert_eq!(note, "moved");
         assert_eq!(info.used, Some(4));
         let n = on_thread(move || resize_lifeboat(&p1, "pw", 20))
             .await

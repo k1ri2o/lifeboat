@@ -444,11 +444,7 @@ mod tests {
         );
         let i = GrowInfo::build(&d, LB, None).unwrap();
         assert!(!i.can_grow);
-        assert!(
-            i.reason.contains("is in front of Lifeboat"),
-            "{}",
-            i.reason
-        );
+        assert!(i.reason.contains("is in front of Lifeboat"), "{}", i.reason);
         assert!(!i.can_move);
         assert!(i.check_size(250 * G).is_err());
     }

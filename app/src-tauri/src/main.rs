@@ -150,6 +150,15 @@ async fn resize_lifeboat(password: String, new_size: u64) -> Result<u64, ApiErro
     blocking(move || pipe::resize_lifeboat(PIPE_NAME, &password, new_size)).await
 }
 
+/// Make Lifeboat bigger by moving it into space taken from the drive in front. Needs the password.
+#[tauri::command]
+async fn move_grow_lifeboat(password: String, new_size: u64) -> Result<String, ApiError> {
+    if password.is_empty() {
+        return Err(ApiError::other("Please type your Lifeboat password."));
+    }
+    blocking(move || pipe::move_grow_lifeboat(PIPE_NAME, &password, new_size)).await
+}
+
 /// Delete Lifeboat for good. Needs the password and the word DELETE.
 #[tauri::command]
 async fn remove_lifeboat(password: String, confirm: String) -> Result<String, ApiError> {
@@ -431,6 +440,7 @@ fn main() {
             vault_remove,
             lifeboat_size_info,
             resize_lifeboat,
+            move_grow_lifeboat,
             remove_lifeboat,
             list_disks,
             prepare_disk,

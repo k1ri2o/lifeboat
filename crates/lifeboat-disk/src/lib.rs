@@ -19,12 +19,12 @@ pub use guard::{check, GuardError, Op};
 pub use lifeboat_core::disk::{
     DiskInfo, PartitionInfo, PrepareMode, BASIC_DATA_TYPE_GUID, MARKER_FILE,
 };
+pub use move_grow::MovePlan;
 pub use ops::{
     close_volume, find_lifeboat_volume, hide_lifeboat_volume, list_disks, open_volume,
     prepare_external, set_disk_offline, set_disk_online, PreparedVolume,
 };
 pub use plan::{execute_shrink, plan_shrink, ShrinkPlan};
-pub use move_grow::MovePlan;
 pub use resize::{grow_info, grow_lifeboat, remove_lifeboat, GrowInfo, RemoveOutcome, RemovePlan};
 
 /// Errors from disk operations.

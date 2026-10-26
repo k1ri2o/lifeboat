@@ -498,9 +498,7 @@ mod tests {
         let j = r#"{"reply":"ResizeInfo","total":1,"max_size":2,"can_grow":false}"#;
         match serde_json::from_str::<Response>(j) {
             Ok(Response::ResizeInfo {
-                can_move,
-                move_max,
-                ..
+                can_move, move_max, ..
             }) => {
                 assert!(!can_move);
                 assert_eq!(move_max, 0);
