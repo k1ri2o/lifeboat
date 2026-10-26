@@ -8,6 +8,7 @@
 
 pub mod acl;
 pub mod guard;
+pub mod move_grow;
 pub mod ops;
 pub mod plan;
 mod ps;

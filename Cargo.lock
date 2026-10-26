@@ -2037,6 +2037,7 @@ dependencies = [
  "lifeboat-core",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -19,19 +19,19 @@ use crate::{Error, Result};
 use lifeboat_core::disk::{is_basic_data_type, DiskInfo, PartitionInfo, BASIC_DATA_TYPE_GUID};
 use serde::Deserialize;
 
-const MIB: u64 = 1024 * 1024;
+pub(crate) const MIB: u64 = 1024 * 1024;
 /// Growing by less than this is not worth a resize.
-const MIN_GROW: u64 = 64 * MIB;
+pub(crate) const MIN_GROW: u64 = 64 * MIB;
 /// Largest gap between the host volume and Lifeboat that still counts as "directly before".
-const HOST_GAP: u64 = 8 * MIB;
+pub(crate) const HOST_GAP: u64 = 8 * MIB;
 /// Free space in front of Lifeboat worth mentioning in the refusal text.
 const FRONT_HINT: u64 = 1024 * MIB;
 
-fn gib(b: u64) -> String {
+pub(crate) fn gib(b: u64) -> String {
     format!("{:.1} GiB", b as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
-fn lifeboat_of<'a>(disk: &'a DiskInfo, guid: &str) -> Result<&'a PartitionInfo> {
+pub(crate) fn lifeboat_of<'a>(disk: &'a DiskInfo, guid: &str) -> Result<&'a PartitionInfo> {
     disk.partitions
         .iter()
         .find(|p| p.has_guid(guid))
@@ -126,7 +126,7 @@ impl GrowInfo {
 }
 
 /// PowerShell that finds the partition with unique GUID `guid` into `$p` (throws when absent).
-fn find_into_p(guid: &str) -> String {
+pub(crate) fn find_into_p(guid: &str) -> String {
     format!(
         "$p = Get-Partition | Where-Object {{ $_.Guid -eq {} }} | Select-Object -First 1; \
          if (-not $p) {{ throw 'partition not found' }}; ",
@@ -178,7 +178,7 @@ pub fn grow_script(guid: &str, new_size: u64) -> String {
     )
 }
 
-fn disk_with(guid: &str) -> Result<DiskInfo> {
+pub(crate) fn disk_with(guid: &str) -> Result<DiskInfo> {
     list_disks()?
         .into_iter()
         .find(|d| d.partitions.iter().any(|p| p.has_guid(guid)))
@@ -234,7 +234,7 @@ pub struct RemovePlan {
 }
 
 /// USB and other removable buses (SD cards, 1394) count as external.
-fn is_removable_bus(bus: &str) -> bool {
+pub(crate) fn is_removable_bus(bus: &str) -> bool {
     let b = bus.to_ascii_lowercase();
     b.contains("usb") || b.contains("sd") || b.contains("mmc") || b.contains("1394")
 }
