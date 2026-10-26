@@ -68,6 +68,8 @@ fn run_console() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tx.send(true);
         });
         let st = Arc::new(server::State::load_default()?);
+        // Settle a resize that a crash interrupted, before anything uses the disk.
+        st.recover_move();
         // Hide the partition at start, in case a crash left it unhidden.
         let guid = st
             .cfg
@@ -136,6 +138,8 @@ fn run_service() -> windows_service::Result<()> {
     ))?;
     let _ = runtime().block_on(async {
         let st = Arc::new(server::State::load_default()?);
+        // Settle a resize that a crash interrupted, before anything uses the disk.
+        st.recover_move();
         // Hide the partition at start, in case a crash left it unhidden.
         let guid = st
             .cfg

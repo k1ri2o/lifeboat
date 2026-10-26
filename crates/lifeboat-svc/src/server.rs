@@ -7,7 +7,9 @@ use crate::security::{
     gate, pipe_client_is_admin, production_sddl, require_admin, Descriptor, RateLimiter, Refusal,
 };
 use crate::store::{self, Store};
-use lifeboat_core::config::{Config, PendingDelete, PendingVaultRemove, DELETE_DELAY_SECS};
+use lifeboat_core::config::{
+    Config, MoveStage, PendingDelete, PendingMove, PendingVaultRemove, DELETE_DELAY_SECS,
+};
 use lifeboat_core::disk::PrepareMode;
 use lifeboat_core::ipc::{FileEntry, Request, Response, SnapshotInfo, VaultItem, PIPE_NAME};
 use lifeboat_detect::FreezeState;
@@ -29,6 +31,15 @@ type VerifyFn =
 type GrowInfoFn = Box<dyn Fn(&str) -> Result<lifeboat_disk::GrowInfo, String> + Send + Sync>;
 type GrowFn = Box<dyn Fn(&str, u64) -> Result<u64, String> + Send + Sync>;
 type RemoveFn = Box<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+type MovePlanFn = Box<dyn Fn(&str) -> Result<lifeboat_disk::MovePlan, String> + Send + Sync>;
+type ShrinkFn = Box<dyn Fn(&str, u64) -> Result<u64, String> + Send + Sync>;
+type CreateFn = Box<dyn Fn(&str, u64) -> Result<String, String> + Send + Sync>;
+type TwoGuidFn = Box<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+type OneGuidFn = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+type CheckCopyFn = Box<dyn Fn(&Config, &str, &str) -> Result<(), String> + Send + Sync>;
+type RollbackFn = Box<dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync>;
+type InUseFn = Box<dyn Fn(&State) -> Option<u64> + Send + Sync>;
+type ExistsFn = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// The disk and password steps behind resize and delete (#54, #55). The real ones touch
 /// Windows disks, so tests replace them.
@@ -40,6 +51,27 @@ pub struct DiskOps {
     pub grow: GrowFn,
     /// Delete the partition; returns a note for the user (may be empty).
     pub remove: RemoveFn,
+    // --- Move and grow (#62) ---
+    /// Read-only plan: which drive gives space, and how much.
+    pub move_plan: MovePlanFn,
+    /// Space in use on the open Lifeboat volume, in bytes.
+    pub in_use: InUseFn,
+    /// Shrink the drive in front of Lifeboat by this much.
+    pub move_shrink: ShrinkFn,
+    /// Create the new hidden partition of this size; returns its GUID.
+    pub move_create: CreateFn,
+    /// Copy the repository from the old partition to the new one and verify the copy.
+    pub move_copy: TwoGuidFn,
+    /// Run the restic check on the copy (config, new GUID, password).
+    pub move_check: CheckCopyFn,
+    /// Delete the old partition (marker verified) without extending the drive in front.
+    pub move_remove_old: OneGuidFn,
+    /// Grow the new partition up to this total size; returns its size.
+    pub move_grow: GrowFn,
+    /// Undo before the switch: (old GUID, host GUID, new GUID or empty).
+    pub move_rollback: RollbackFn,
+    /// Does a partition with this GUID still exist?
+    pub move_exists: ExistsFn,
 }
 
 impl DiskOps {
@@ -62,6 +94,60 @@ impl DiskOps {
                 lifeboat_disk::remove_lifeboat(g)
                     .map(|o| o.note)
                     .map_err(|e| e.to_string())
+            }),
+            move_plan: Box::new(|g| lifeboat_disk::move_grow::plan(g).map_err(|e| e.to_string())),
+            in_use: Box::new(|st| {
+                let guid = st.snapshot_cfg().partition_guid;
+                let total = lifeboat_disk::grow_info(&guid).ok()?.current_size;
+                let v = st.ctx.lease.held_path()?;
+                free_bytes(&v).map(|f| total.saturating_sub(f))
+            }),
+            move_shrink: Box::new(|h, x| {
+                lifeboat_disk::move_grow::shrink_host(h, x).map_err(|e| e.to_string())
+            }),
+            move_create: Box::new(|g, x| {
+                lifeboat_disk::move_grow::create_new(g, x).map_err(|e| e.to_string())
+            }),
+            move_copy: Box::new(|a, b| {
+                lifeboat_disk::move_grow::copy_repo(a, b).map_err(|e| e.to_string())
+            }),
+            move_check: Box::new(|cfg, new_guid, password| {
+                let vol = match lifeboat_disk::open_volume(new_guid, None) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => {
+                        let _ = lifeboat_disk::close_volume(new_guid, None);
+                        return Err("The new copy could not be opened.".into());
+                    }
+                    Err(e) => {
+                        let _ = lifeboat_disk::close_volume(new_guid, None);
+                        return Err(e.to_string());
+                    }
+                };
+                let eng = Engine::new(
+                    Engine::default_restic(),
+                    PathBuf::from(&vol).join("repo"),
+                    password.to_string(),
+                    cfg.folders.clone(),
+                );
+                let r = eng
+                    .check()
+                    .map_err(|e| format!("The new copy did not pass its check: {e}"));
+                let _ = lifeboat_disk::close_volume(new_guid, None);
+                r
+            }),
+            move_remove_old: Box::new(|g| {
+                lifeboat_disk::move_grow::remove_partition(g).map_err(|e| e.to_string())
+            }),
+            move_grow: Box::new(|g, n| {
+                lifeboat_disk::move_grow::grow_new(g, n).map_err(|e| e.to_string())
+            }),
+            move_rollback: Box::new(|o, h, n| {
+                lifeboat_disk::move_grow::rollback(o, h, n).map_err(|e| e.to_string())
+            }),
+            move_exists: Box::new(|g| {
+                lifeboat_disk::list_disks()
+                    .map(|ds| ds.iter().any(|d| d.partitions.iter().any(|p| p.has_guid(g))))
+                    .unwrap_or(true)
             }),
         }
     }
@@ -111,6 +197,39 @@ impl State {
         let cfg = store.load()?;
         let paths = Paths::in_dir(store.dir());
         Ok(State::new(cfg, Some(store), paths))
+    }
+
+    /// Finish or undo a move-and-grow that a crash or power loss interrupted (#62). Run once
+    /// at start, before anything else uses the disk. A journal that cannot be settled stays
+    /// for the next start.
+    pub fn recover_move(&self) {
+        let cfg = self.snapshot_cfg();
+        let Some(j) = cfg.pending_move.clone() else {
+            return;
+        };
+        let ops = &self.disk_ops;
+        match j.stage {
+            MoveStage::Building => {
+                // The config still points at the old partition: remove the half-made new one
+                // and give the drive in front its space back.
+                if (ops.move_rollback)(&j.old_guid, &j.host_guid, &j.new_guid).is_ok() {
+                    let _ = self.update(|c| c.pending_move = None);
+                }
+            }
+            MoveStage::Switched => {
+                if cfg.partition_guid != j.new_guid {
+                    // Not what the journal expects: touch no disk, just drop the note.
+                    let _ = self.update(|c| c.pending_move = None);
+                    return;
+                }
+                if (ops.move_exists)(&j.old_guid) && (ops.move_remove_old)(&j.old_guid).is_err() {
+                    return;
+                }
+                // Best effort: backups already run from the new partition.
+                let _ = (ops.move_grow)(&j.new_guid, j.target);
+                let _ = self.update(|c| c.pending_move = None);
+            }
+        }
     }
 
     fn snapshot_cfg(&self) -> Config {
@@ -1287,6 +1406,12 @@ fn dispatch(
             }
             resize_lifeboat(st, limiter, &cfg, &password, new_size)
         }
+        Request::MoveGrowLifeboat { password, new_size } => {
+            if let Err(r) = require_admin(is_admin()) {
+                return refused(r);
+            }
+            move_grow_lifeboat(st, limiter, &cfg, &password, new_size)
+        }
         Request::RemoveLifeboat { password, confirm } => {
             if let Err(r) = require_admin(is_admin()) {
                 return refused(r);
@@ -1337,8 +1462,153 @@ fn lifeboat_size_info_with(
             max_size: i.max_size,
             can_grow: i.can_grow,
             reason: i.reason,
+            can_move: i.can_move,
+            move_max: i.move_max,
         },
         Err(e) => err(e),
+    }
+}
+
+/// Make Lifeboat bigger by moving it (#62): take space from the drive in front of it, copy
+/// the backups into a new, bigger hidden partition, check the copy, switch over, and only
+/// then remove the old partition. Password-gated, refused while frozen.
+fn move_grow_lifeboat(
+    st: &State,
+    limiter: &RateLimiter,
+    cfg: &Config,
+    password: &str,
+    new_size: u64,
+) -> Response {
+    if is_frozen(st) {
+        return err("backups are frozen; unfreeze first");
+    }
+    let guid = match lifeboat_guid(cfg) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    if cfg.pending_move.is_some() {
+        return err("A previous resize is still being settled. Restart the Lifeboat service and try again.");
+    }
+    if let Err(r) = (st.disk_ops.verify)(st, cfg, limiter, password) {
+        return r;
+    }
+    let _w = st.ctx.write();
+    if is_frozen(st) {
+        return err("backups are frozen; unfreeze first");
+    }
+    // Measured while the volume is still open, before the lease goes.
+    let used = (st.disk_ops.in_use)(st);
+    st.ctx.lease.release_now();
+    let result = run_move(st, cfg, guid, password, new_size, used);
+    st.ctx.caches.invalidate_all();
+    result
+}
+
+fn run_move(
+    st: &State,
+    cfg: &Config,
+    old: &str,
+    password: &str,
+    new_size: u64,
+    used: Option<u64>,
+) -> Response {
+    let ops = &st.disk_ops;
+    let plan = match (ops.move_plan)(old) {
+        Ok(p) => p,
+        Err(e) => return err(e),
+    };
+    let Some(used) = used else {
+        return err("Lifeboat cannot tell how much space is in use right now, so it cannot make a safe copy. Try again in a moment.");
+    };
+    let x = match plan.check_target(used, new_size) {
+        Ok(x) => x,
+        Err(e) => return err(e.to_string()),
+    };
+    let target = plan.current_size + x;
+    let mut j = PendingMove {
+        stage: MoveStage::Building,
+        old_guid: old.to_string(),
+        new_guid: String::new(),
+        host_guid: plan.host_guid.clone(),
+        target,
+    };
+    // Written before the disk is touched, so a crash can be settled on the next start.
+    if let Err(e) = st.update(|c| c.pending_move = Some(j.clone())) {
+        let _ = st.update(|c| c.pending_move = None);
+        return err(e);
+    }
+    // Undo everything up to the switch. The old partition and the config stay as they were.
+    let undo = |st: &State, j: &PendingMove, why: String| -> Response {
+        match (st.disk_ops.move_rollback)(&j.old_guid, &j.host_guid, &j.new_guid) {
+            Ok(()) => {
+                let _ = st.update(|c| {
+                    c.partition_guid = j.old_guid.clone();
+                    c.pending_move = None;
+                });
+                err(format!(
+                    "{why} Nothing was changed: your backups and the old Lifeboat are untouched."
+                ))
+            }
+            Err(e) => err(format!(
+                "{why} Undoing the change also failed ({e}). Your backups are untouched; Lifeboat will try to undo it again when the service restarts."
+            )),
+        }
+    };
+    if let Err(e) = (ops.move_shrink)(&j.host_guid, x) {
+        return undo(st, &j, format!("Could not take space from the drive: {e}."));
+    }
+    let new = match (ops.move_create)(old, x) {
+        Ok(g) => g,
+        Err(e) => {
+            return undo(
+                st,
+                &j,
+                format!("Could not create the bigger Lifeboat: {e}."),
+            )
+        }
+    };
+    j.new_guid = new.clone();
+    if let Err(e) = st.update(|c| c.pending_move = Some(j.clone())) {
+        return undo(st, &j, e);
+    }
+    if let Err(e) = (ops.move_copy)(old, &new) {
+        return undo(st, &j, format!("Could not copy the backups: {e}."));
+    }
+    if let Err(e) = (ops.move_check)(cfg, &new, password) {
+        return undo(st, &j, e);
+    }
+    // The point of no return: from here the new partition is the real one.
+    j.stage = MoveStage::Switched;
+    if let Err(e) = st.update(|c| {
+        c.partition_guid = new.clone();
+        c.pending_move = Some(j.clone());
+    }) {
+        j.stage = MoveStage::Building;
+        return undo(st, &j, e);
+    }
+    if let Err(e) = (ops.move_remove_old)(old) {
+        // Backups already use the new partition; the old one is removed at the next start.
+        return Response::Moved {
+            new_size: x,
+            note: format!(
+                "Lifeboat is now bigger, but the old copy could not be removed yet ({e}). It will be removed when the service restarts."
+            ),
+        };
+    }
+    let mut note = String::new();
+    let size = match (ops.move_grow)(&new, target) {
+        Ok(n) => n,
+        Err(e) => {
+            note = format!(
+                "Lifeboat is bigger and your backups are safe, but it could not use all of the freed space yet ({e})."
+            );
+            x
+        }
+    };
+    let _ = st.update(|c| c.pending_move = None);
+    Response::Moved {
+        new_size: size,
+        note,
     }
 }
 
@@ -2292,6 +2562,8 @@ mod tests {
                 can_grow: true,
                 reason: String::new(),
                 used: Some(4),
+                can_move: false,
+                move_max: 10,
             })
         });
         st
@@ -2409,6 +2681,8 @@ mod tests {
                 max_size: 30,
                 can_grow: true,
                 reason: String::new(),
+                can_move: false,
+                move_max: 10,
             }
         );
     }
@@ -2515,6 +2789,333 @@ mod tests {
             );
             assert_eq!(calls.load(Ordering::SeqCst), 0, "{line}");
             assert!(!st.snapshot_cfg().partition_guid.is_empty());
+        }
+    }
+
+    // --- Move and grow (#62) ---
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    type Log = Arc<Mutex<Vec<String>>>;
+
+    /// A state whose move steps only write their name into a log. `fail_at` names the step
+    /// that returns an error ("" for none).
+    fn move_state(dir: &std::path::Path, log: Log, fail_at: &'static str) -> State {
+        let mut st = disk_state(dir, Arc::new(AtomicU32::new(0)));
+        let step = move |name: &'static str, log: &Log| -> Result<(), String> {
+            log.lock().unwrap().push(name.to_string());
+            if name == fail_at {
+                Err(format!("{name} broke"))
+            } else {
+                Ok(())
+            }
+        };
+        let l = log.clone();
+        st.disk_ops.move_plan = Box::new(move |_| {
+            l.lock().unwrap().push("plan".into());
+            Ok(lifeboat_disk::MovePlan {
+                disk_number: 1,
+                host_guid: "{host}".into(),
+                host_letter: 'D',
+                current_size: 10 * GIB,
+                room: 100 * GIB,
+            })
+        });
+        st.disk_ops.in_use = Box::new(|_| Some(GIB));
+        let l = log.clone();
+        st.disk_ops.move_shrink = Box::new(move |_, x| step("shrink", &l).map(|_| x));
+        let l = log.clone();
+        st.disk_ops.move_create = Box::new(move |_, _| step("create", &l).map(|_| "{new}".into()));
+        let l = log.clone();
+        st.disk_ops.move_copy = Box::new(move |_, _| step("copy", &l));
+        let l = log.clone();
+        st.disk_ops.move_check = Box::new(move |_, _, pw| {
+            assert_eq!(pw, "good");
+            step("check", &l)
+        });
+        let l = log.clone();
+        st.disk_ops.move_remove_old = Box::new(move |_| step("remove_old", &l));
+        let l = log.clone();
+        st.disk_ops.move_grow = Box::new(move |_, n| step("grow", &l).map(|_| n));
+        let l = log.clone();
+        st.disk_ops.move_rollback = Box::new(move |o, h, n| {
+            l.lock().unwrap().push(format!("rollback {o} {h} {n}"));
+            Ok(())
+        });
+        st.disk_ops.move_exists = Box::new(|_| true);
+        st
+    }
+
+    const MOVE_LINE: &str = r#"{"cmd":"MoveGrowLifeboat","password":"good","new_size":14000000000}"#;
+
+    fn names(log: &Log) -> Vec<String> {
+        log.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn move_grow_runs_the_steps_in_order_and_switches() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let st = move_state(d.path(), log.clone(), "");
+        let r = call(MOVE_LINE, &st, true);
+        assert!(
+            matches!(&r, Response::Moved { note, .. } if note.is_empty()),
+            "{r:?}"
+        );
+        assert_eq!(
+            names(&log),
+            ["plan", "shrink", "create", "copy", "check", "remove_old", "grow"]
+        );
+        let cfg = st.snapshot_cfg();
+        assert_eq!(cfg.partition_guid, "{new}");
+        assert!(cfg.pending_move.is_none());
+        // Saved too.
+        let saved = Store::at(d.path().join("config.json")).load().unwrap();
+        assert_eq!(saved.partition_guid, "{new}");
+        assert!(saved.pending_move.is_none());
+    }
+
+    #[test]
+    fn move_grow_failure_before_the_switch_rolls_back() {
+        for step in ["shrink", "create", "copy", "check"] {
+            let d = tempfile::tempdir().unwrap();
+            let log: Log = Default::default();
+            let st = move_state(d.path(), log.clone(), step);
+            let m = message(call(MOVE_LINE, &st, true));
+            assert!(m.contains(&format!("{step} broke")), "{step}: {m}");
+            assert!(m.contains("untouched"), "{m}");
+            let n = names(&log);
+            // Nothing after the failing step except the rollback; the old one is never removed.
+            assert!(!n.contains(&"remove_old".to_string()), "{step}: {n:?}");
+            assert!(!n.contains(&"grow".to_string()), "{step}: {n:?}");
+            let last = n.last().unwrap();
+            let new = if step == "shrink" || step == "create" {
+                ""
+            } else {
+                "{new}"
+            };
+            assert_eq!(last, &format!("rollback {{guid-1}} {{host}} {new}"), "{n:?}");
+            let cfg = st.snapshot_cfg();
+            assert_eq!(cfg.partition_guid, "{guid-1}", "{step}");
+            assert!(cfg.pending_move.is_none(), "{step}");
+            let saved = Store::at(d.path().join("config.json")).load().unwrap_or_default();
+            assert!(saved.pending_move.is_none(), "{step}");
+        }
+    }
+
+    #[test]
+    fn move_grow_failed_rollback_keeps_the_journal_for_restart() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let mut st = move_state(d.path(), log, "copy");
+        st.disk_ops.move_rollback = Box::new(|_, _, _| Err("disk busy".into()));
+        let m = message(call(MOVE_LINE, &st, true));
+        assert!(m.contains("try to undo it again"), "{m}");
+        let cfg = st.snapshot_cfg();
+        assert_eq!(cfg.partition_guid, "{guid-1}");
+        let j = cfg.pending_move.unwrap();
+        assert_eq!(j.stage, MoveStage::Building);
+        assert_eq!(j.new_guid, "{new}");
+    }
+
+    #[test]
+    fn move_grow_final_grow_failure_still_succeeds_with_a_note() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let st = move_state(d.path(), log, "grow");
+        let r = call(MOVE_LINE, &st, true);
+        match r {
+            Response::Moved { new_size, note } => {
+                assert!(note.contains("backups are safe"), "{note}");
+                assert!(new_size > 0);
+            }
+            r => panic!("{r:?}"),
+        }
+        assert_eq!(st.snapshot_cfg().partition_guid, "{new}");
+        assert!(st.snapshot_cfg().pending_move.is_none());
+    }
+
+    #[test]
+    fn move_grow_old_partition_removal_failure_keeps_the_switched_journal() {
+        let d = tempfile::tempdir().unwrap();
+        let st = move_state(d.path(), Default::default(), "remove_old");
+        let r = call(MOVE_LINE, &st, true);
+        assert!(
+            matches!(&r, Response::Moved { note, .. } if note.contains("old copy")),
+            "{r:?}"
+        );
+        let cfg = st.snapshot_cfg();
+        assert_eq!(cfg.partition_guid, "{new}");
+        assert_eq!(cfg.pending_move.unwrap().stage, MoveStage::Switched);
+    }
+
+    #[test]
+    fn move_grow_wrong_password_frozen_and_non_admin_never_reach_the_disk() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let st = move_state(d.path(), log.clone(), "");
+        let bad = MOVE_LINE.replace("good", "bad");
+        assert_eq!(message(call(&bad, &st, true)), "password wrong");
+        let limiter = RateLimiter::default();
+        assert_eq!(
+            message(handle_line(MOVE_LINE, &st, &limiter, &|| false)),
+            Refusal::NeedsAdmin.to_string()
+        );
+        freeze(&st);
+        assert_eq!(
+            message(call(MOVE_LINE, &st, true)),
+            "backups are frozen; unfreeze first"
+        );
+        assert!(names(&log).is_empty(), "{:?}", names(&log));
+        assert_eq!(st.snapshot_cfg().partition_guid, "{guid-1}");
+    }
+
+    #[test]
+    fn move_grow_refuses_a_size_that_is_too_small_before_touching_the_disk() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let st = move_state(d.path(), log.clone(), "");
+        // 10.5 GiB: the copy needs more than 0.5 GiB of new room.
+        let line = r#"{"cmd":"MoveGrowLifeboat","password":"good","new_size":11000000000}"#;
+        let m = message(call(line, &st, true));
+        assert!(m.contains("smallest size that works"), "{m}");
+        assert_eq!(names(&log), ["plan"]);
+        assert!(st.snapshot_cfg().pending_move.is_none());
+    }
+
+    #[test]
+    fn move_grow_refuses_when_usage_is_unknown() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let mut st = move_state(d.path(), log.clone(), "");
+        st.disk_ops.in_use = Box::new(|_| None);
+        let m = message(call(MOVE_LINE, &st, true));
+        assert!(m.contains("cannot tell how much space"), "{m}");
+        assert!(!names(&log).contains(&"shrink".to_string()));
+    }
+
+    fn journal(stage: MoveStage) -> PendingMove {
+        PendingMove {
+            stage,
+            old_guid: "{old}".into(),
+            new_guid: "{new}".into(),
+            host_guid: "{host}".into(),
+            target: 20 * GIB,
+        }
+    }
+
+    #[test]
+    fn recovery_of_a_half_built_move_deletes_the_new_partition_and_gives_the_space_back() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let st = move_state(d.path(), log.clone(), "");
+        st.update(|c| {
+            c.partition_guid = "{old}".into();
+            c.pending_move = Some(journal(MoveStage::Building));
+        })
+        .unwrap();
+        st.recover_move();
+        assert_eq!(names(&log), ["rollback {old} {host} {new}"]);
+        let cfg = st.snapshot_cfg();
+        assert_eq!(cfg.partition_guid, "{old}");
+        assert!(cfg.pending_move.is_none());
+    }
+
+    #[test]
+    fn recovery_of_a_half_built_move_keeps_the_journal_if_the_undo_fails() {
+        let d = tempfile::tempdir().unwrap();
+        let mut st = move_state(d.path(), Default::default(), "");
+        st.disk_ops.move_rollback = Box::new(|_, _, _| Err("busy".into()));
+        st.update(|c| c.pending_move = Some(journal(MoveStage::Building)))
+            .unwrap();
+        st.recover_move();
+        assert!(st.snapshot_cfg().pending_move.is_some());
+    }
+
+    #[test]
+    fn recovery_after_the_switch_removes_the_old_partition_and_grows() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let st = move_state(d.path(), log.clone(), "");
+        st.update(|c| {
+            c.partition_guid = "{new}".into();
+            c.pending_move = Some(journal(MoveStage::Switched));
+        })
+        .unwrap();
+        st.recover_move();
+        assert_eq!(names(&log), ["remove_old", "grow"]);
+        let cfg = st.snapshot_cfg();
+        assert_eq!(cfg.partition_guid, "{new}");
+        assert!(cfg.pending_move.is_none());
+    }
+
+    #[test]
+    fn recovery_after_the_switch_with_the_old_partition_gone_only_grows() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let mut st = move_state(d.path(), log.clone(), "");
+        st.disk_ops.move_exists = Box::new(|_| false);
+        st.update(|c| {
+            c.partition_guid = "{new}".into();
+            c.pending_move = Some(journal(MoveStage::Switched));
+        })
+        .unwrap();
+        st.recover_move();
+        assert_eq!(names(&log), ["grow"]);
+        assert!(st.snapshot_cfg().pending_move.is_none());
+    }
+
+    #[test]
+    fn recovery_never_removes_anything_when_the_config_does_not_match_the_journal() {
+        let d = tempfile::tempdir().unwrap();
+        let log: Log = Default::default();
+        let st = move_state(d.path(), log.clone(), "");
+        // Switched journal, but the config still points at the old partition.
+        st.update(|c| {
+            c.partition_guid = "{old}".into();
+            c.pending_move = Some(journal(MoveStage::Switched));
+        })
+        .unwrap();
+        st.recover_move();
+        assert!(names(&log).is_empty());
+        assert!(st.snapshot_cfg().pending_move.is_none());
+    }
+
+    #[test]
+    fn recovery_failing_to_remove_the_old_partition_keeps_the_journal() {
+        let d = tempfile::tempdir().unwrap();
+        let st = move_state(d.path(), Default::default(), "remove_old");
+        st.update(|c| {
+            c.partition_guid = "{new}".into();
+            c.pending_move = Some(journal(MoveStage::Switched));
+        })
+        .unwrap();
+        st.recover_move();
+        assert!(st.snapshot_cfg().pending_move.is_some());
+    }
+
+    #[test]
+    fn size_info_carries_the_move_fields() {
+        let d = tempfile::tempdir().unwrap();
+        let mut st = disk_state(d.path(), Arc::new(AtomicU32::new(0)));
+        st.disk_ops.grow_info = Box::new(|_| {
+            Ok(lifeboat_disk::GrowInfo {
+                current_size: 10,
+                max_size: 10,
+                can_grow: false,
+                reason: "x".into(),
+                used: None,
+                can_move: true,
+                move_max: 50,
+            })
+        });
+        match call(r#"{"cmd":"LifeboatSizeInfo"}"#, &st, true) {
+            Response::ResizeInfo {
+                can_move, move_max, ..
+            } => {
+                assert!(can_move);
+                assert_eq!(move_max, 50);
+            }
+            r => panic!("{r:?}"),
         }
     }
 }
